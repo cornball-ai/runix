@@ -1,0 +1,246 @@
+# Phase 1: Read-Only Introspection — API Contracts
+
+Drafted 2026-08-07. Defines the stable structured R APIs for the first two Runix
+packages **before** any backend is chosen, per the Phase 1 kickoff constraints:
+
+1. Phase 1 is strictly read-only. No package mutations, no service mutations.
+2. Separate packages per concern — no monolithic Runix package.
+3. `ubuntu-security-status` is the **acceptance consumer**, not the first
+   implementation target: the APIs are done when its output can be reproduced
+   from them, but we do not start by porting it.
+4. API contracts (this document) come first; each backend
+   (libapt-pkg, sd-bus, sd-journal, or a temporary CLI bridge under PLAN.md's
+   bridge discipline) is chosen per-function afterward.
+5. Fixture tests plus live Ubuntu smoke tests (`tinytest::at_home()`).
+6. Nothing mutates, and `ubuntu-security-status` is not replaced, until these
+   read-only contracts stabilize.
+
+## Package boundaries
+
+Two packages. Names provisional (rsystemd is already in PLAN.md; the apt-read
+name needs Troy's sign-off):
+
+- **rdpkg** — installed-package state (dpkg) and archive/candidate state (apt):
+  what is installed, what is available, where it comes from.
+- **rsystemd** — units, timers, journal, system state. Read-only subset of
+  PLAN.md's rsystemd; the mutation API (`systemd_start()` etc.) waits for
+  Phase 2.
+
+Shared conventions live in this doc, not in a shared package (no premature
+`runix` core; extract commonality only when it repeats).
+
+## Conventions (both packages)
+
+- Every listing function returns a plain `data.frame` (no tibbles, no classes
+  beyond `data.frame`), `stringsAsFactors = FALSE`, stable column order as
+  documented, zero-row data frame with the same columns when nothing matches.
+- Scalars/records return named lists with documented names.
+- Fail-closed: a missing backend tool or unparseable output is an error
+  (typed condition), never a guess. An absent *subsystem* (e.g. no systemd)
+  is an error, not an empty result — emptiness must mean "queried fine,
+  nothing there".
+- Typed conditions: errors inherit from `runix_error`; per-package subclasses
+  `rdpkg_error`, `rsystemd_error`; parse failures add `runix_parse_error`.
+- All time columns are `POSIXct` in UTC. All size columns are numeric bytes.
+- Backend functions are injectable: each package has an
+  internal runner the tests replace with fakes; exported functions never call
+  `system2()` directly.
+- No masking of base names; no non-base dependencies in Imports beyond what
+  the chosen backend forces (target: zero).
+
+## rdpkg contract
+
+```r
+dpkg_installed()
+# data.frame: package, version, architecture, status
+#   status: "installed" | "config-files" | ... (dpkg status word, verbatim)
+
+apt_candidates(packages = NULL)
+# data.frame: package, architecture, installed, candidate
+#   installed/candidate: version strings; NA when absent
+#   packages = NULL means all known to the cache
+
+apt_upgradable()
+# data.frame: package, architecture, installed, candidate,
+#             origin, site, suite, component, security
+#   security: logical — candidate comes from a security pocket/origin
+#   One row per upgradable package (candidate != installed)
+
+apt_origins(packages = NULL)
+# data.frame: package, version, origin, site, suite, component, trusted
+#   One row per (package, available version, origin) — the raw material for
+#   any origin classification (main/universe/ESM/PPA/third-party)
+
+apt_policy(package)
+# list: package, installed, candidate, pins (data.frame: version, priority,
+#   origin, site, suite, component)
+
+apt_cache_updated()
+# list: lists_updated (POSIXct — newest /var/lib/apt/lists stamp),
+#       status_changed (POSIXct — dpkg status mtime)
+```
+
+Origin classification (which origins count as Ubuntu main vs universe vs
+ESM vs third-party) is **deliberately not** an rdpkg API: it is Ubuntu policy,
+not package state. It belongs to the acceptance consumer, driven by fixtures
+(see below). rdpkg's job ends at faithful origin rows.
+
+## rsystemd contract
+
+```r
+systemd_units(pattern = NULL)
+# data.frame: unit, load_state, active_state, sub_state, description
+#   pattern: optional glob, server-side filtering where the backend allows
+
+systemd_unit_info(unit)
+# named list of typed properties (documented subset, not the full 200+):
+#   unit, description, load_state, active_state, sub_state, unit_file_state,
+#   fragment_path, active_enter_time (POSIXct), main_pid (integer),
+#   memory_current (numeric bytes, NA if unset), restarts (integer)
+
+systemd_timers()
+# data.frame: timer, next_elapse (POSIXct), last_trigger (POSIXct),
+#             activates, active_state
+
+systemd_journal(unit = NULL, priority = NULL, since = NULL,
+                until = NULL, n = 1000L)
+# data.frame: time (POSIXct), priority (integer 0-7), unit, pid (integer),
+#             message
+#   n caps rows returned (newest last); priority filters at-or-above severity
+
+systemd_state()
+# list: state ("running" | "degraded" | ...), failed_units (character vector)
+```
+
+## Backend candidates (decision deferred, per constraint 4)
+
+Documented so the choice is made per-function with evidence, not by default:
+
+| API area | Bridge candidate | Native candidate |
+|---|---|---|
+| dpkg_installed | `dpkg-query -W -f` (stable, documented format) | libapt-pkg |
+| apt_candidates / origins / policy | `apt-cache policy` (semi-stable; apt CLI warns its own interface is unstable) | **libapt-pkg** — RcppAPT is prior art; likely the first native binding Phase 1 justifies |
+| systemd_units / timers | `systemctl list-units --output=json` (machine format, systemd ≥ 249; this box: 255) | sd-bus `ListUnits` |
+| systemd_unit_info | `systemctl show -p` (key=value, stable) | sd-bus `GetAll` |
+| systemd_journal | `journalctl -o json` (stable NDJSON, documented) | sd-journal |
+| systemd_state | `systemctl is-system-running` + `--failed` | sd-bus properties |
+
+The systemd bridges emit machine-readable JSON — materially safer than text
+scraping and a legitimate medium-term resting point. The apt side is where the
+bridge is weakest (apt's CLI explicitly disclaims stability), which is the
+argument for libapt-pkg arriving first there. Every bridge follows PLAN.md's
+bridge discipline (LC_ALL=C, fail-closed, verified postconditions n/a for
+read-only, injectable runners, native-shaped return types).
+
+## Acceptance: ubuntu-security-status as consumer
+
+Done means: a short R script using only rdpkg exported functions reproduces,
+on this machine, the package counts ubuntu-security-status reports (packages by
+origin class, ESM-eligible counts), validated against the live tool's output.
+
+The origin-classification table is extracted **mechanically** from the tool's
+source with bonsaisitter + treesitter.python — verified working today:
+
+```r
+lang <- treesitter.python::language()
+src  <- paste(readLines("/usr/bin/ubuntu-security-status"), collapse = "\n")
+root <- bonsaisitter::tree_root_node(bonsaisitter::text_parse(src, lang))
+q    <- bonsaisitter::query(lang,
+         "(assignment left: (identifier) @name right: (tuple) @tuple)")
+ca   <- bonsaisitter::query_captures(q, root)
+# 20 suite_* tuples: suite_main, suite_esm_main, suite_esm_apps, ...
+```
+
+That extraction becomes a generated fixture
+(`inst/tinytest/fixtures/uss-origin-tuples.json` plus the generator script in
+`tools/`), so when Ubuntu changes the tool, regenerating the fixture shows the
+drift as a diff instead of a silent test failure.
+
+bonsaisitter caveats that matter here (from today's verification): query
+predicates (`#eq?`/`#match?`) are unimplemented — filter captures in R;
+patterns anchored at `module` can silently match nothing — query unanchored
+and filter by parent; `treesitter.c` is not installed locally and CRAN's
+hard-Imports the Posit runtime (flagged in bonsaisitter's todo) — C-header
+analysis for the native backends will want that resolved, with treesitter.cpp
+(ABI 14) as the workable stand-in meanwhile.
+
+## Testing strategy
+
+- **Fixture tests** (always run, including R CMD check): recorded real outputs
+  of each bridge command (`dpkg-query`, `apt-cache policy`,
+  `systemctl --output=json`, `journalctl -o json`) live in
+  `inst/tinytest/fixtures/`; parsers run against them offline via the
+  injectable runner. Malformed-input fixtures prove fail-closed behavior.
+- **Live smoke tests** (`at_home()` only): each exported function runs against
+  this machine and asserts invariants (columns, types, non-empty where
+  guaranteed — e.g. `systemd_units()` must contain `-.mount`), not exact values.
+- **Acceptance test** (`at_home()` only): the ubuntu-security-status
+  reproduction script, compared to the live tool.
+
+## Out of scope for Phase 1
+
+Mutations of any kind; rctl (waits until the R APIs settle); rdbus (the JSON
+bridges defer it); replacement of any Python tool; netplan work (Phase 4
+candidate, needs Phase 2/3 first); packaging/distribution (Phase 6).
+
+## Decisions (Troy, 2026-08-07)
+
+1. **Package name: rdpkg.** Read-only, scope stated explicitly: dpkg
+   status/database plus apt metadata queries (candidates, origins,
+   upgradeability). Mutations stay in rapt; no `rapt.query`; rapt's
+   dependency surface does not grow.
+2. **Repositories: top-level `~/rdpkg` and `~/rsystemd`**, matching the
+   independent-package architecture — no later repository split. Local-only
+   for now (no GitHub); work happens on feature branches over the skeleton
+   baseline commit.
+
+## Architecture: dependency direction (recorded 2026-08-07)
+
+Thin and acyclic. Arrows are the only permitted dependency directions:
+
+```text
+rctl (CLI frontend)
+  |
+  v
+subsystem packages: rdpkg, rsystemd, rudev, rnetwork, rpolkit, ...
+  |
+  v
+runix (small common layer)
+```
+
+- **runix** provides shared conventions, common condition classes/types,
+  aggregation, and cross-subsystem helpers. It does **not** reimplement
+  subsystems and does not necessarily import any of them.
+- Subsystem packages never import each other, and nothing imports upward.
+- **rctl** is the CLI frontend over the subsystem APIs, nothing more.
+- Phase 1 note: the injectable runner and condition helpers are deliberately
+  duplicated in rdpkg and rsystemd for now; they migrate down into runix once
+  the pattern survives review, not before.
+
+**rnetwork and Netplan**: rnetwork is the eventual home for both
+NetworkManager and Netplan integration, but Netplan is an **optional
+backend** — they are related layers, and ordinary NetworkManager users must
+not acquire a mandatory libnetplan dependency (runtime-detected /
+Suggests-level, never Imports/SystemRequirements for the NM path).
+
+**rpolkit** exposes authorization/policy integration when something needs
+explicit `CheckAuthorization`; service-level authorization (the target
+daemon's own polkit checks) remains the primary mechanism where available.
+
+**Tree-sitter isolation**: source-analysis tooling (bonsaisitter +
+treesitter.* — including CRAN's treesitter.c for C sources, whose Imports
+situation is a known portability concern) lives only behind the
+fixture-generator boundary: `tools/` scripts that emit committed fixture
+files. It never appears in any subsystem package's Imports or Suggests, and
+the injectable runner + fixture harness work without Tree-sitter installed —
+fixtures are committed artifacts, not build-time products.
+
+## Repository layout
+
+- `~/runix` — umbrella: PLAN.md, this contract, the Phase 0 inventory.
+  No package code.
+- `~/rdpkg` — apt/dpkg read APIs. Scaffolded 2026-08-07 (0.0.1, MIT,
+  OS_type: unix, tinytest wired, installs and tests clean).
+- `~/rsystemd` — systemd read APIs. Same scaffold, same date.
+- Neither package depends on the other; both are governed by this contract.
+  rapt is unchanged and owns all apt mutations.
