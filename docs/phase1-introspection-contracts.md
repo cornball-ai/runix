@@ -262,6 +262,14 @@ Suggests-level, never Imports/SystemRequirements for the NM path).
 explicit `CheckAuthorization`; service-level authorization (the target
 daemon's own polkit checks) remains the primary mechanism where available.
 
+**rctl launcher (recorded 2026-08-07)**: littler (`r`) is the CLI launcher —
+fast startup, conventional Unix command behavior — and nothing more:
+`rctl → littler launcher → Runix APIs → subsystem packages`. littler never
+appears in rdpkg, rsystemd, or the common layer; it is an explicit
+dependency of the CLI package alone (the Ubuntu `.deb` may Depend on it),
+with an `Rscript` fallback for portability. It optimizes delivery and
+startup; it does not shape the subsystem APIs.
+
 **Tree-sitter isolation**: source-analysis tooling (bonsaisitter +
 treesitter.* — including CRAN's treesitter.c for C sources, whose Imports
 situation is a known portability concern) lives only behind the
