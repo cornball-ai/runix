@@ -84,10 +84,22 @@ apt_candidates(packages)
 #   NA where apt reports (none). Unknown names yield zero rows.
 
 apt_upgradable()
-# data.frame: package, architecture, installed, candidate,
-#             origin, site, suite, component, security
-#   security: logical — candidate comes from a security pocket/origin
-#   One row per upgradable package (candidate != installed)
+# data.frame: package, installed, candidate, origin, site, suite,
+#             component, security, phased_percent
+#   Semantics: one row per installed package whose candidate version
+#   differs from the installed version — "candidate-available".
+#   Actionability (phasing cohort membership, dpkg holds, dependency
+#   holds) is deliberately NOT decided here: phased_percent (integer, NA
+#   when unannotated) and the origin columns give callers the data, and
+#   an "actually actionable" plan query belongs to Phase 2 alongside
+#   mutations. origin/site/suite/component describe the candidate
+#   version's best source; security: logical, candidate served from a
+#   security pocket. package echoes the queried name/name:arch spelling;
+#   architecture column deferred to the native backend like
+#   apt_candidates. Bridge mechanism: composed from dpkg_installed() +
+#   apt_candidates() + apt_origins() — no new parser. (Amended
+#   2026-08-07: dropped architecture, added phased_percent, pinned
+#   candidate-available semantics.)
 
 apt_origins(packages)
 # packages: character vector of package names, length >= 1. The
@@ -115,7 +127,10 @@ apt_policy(package)
 # list: package, installed, candidate, pins (data.frame: version, priority,
 #   origin, site, suite, component)
 
-apt_cache_updated()
+apt_cache_timestamps()
+# Read-only status query. (Renamed from apt_cache_updated 2026-08-07 so the
+# name cannot read as a verb: nothing in Phase 1 refreshes the apt cache -
+# cache refresh is a mutation and belongs to Phase 2.)
 # list: lists_updated (POSIXct — newest /var/lib/apt/lists stamp),
 #       status_changed (POSIXct — dpkg status mtime)
 ```
@@ -224,7 +239,10 @@ analysis for the native backends will want that resolved, with treesitter.cpp
   this machine and asserts invariants (columns, types, non-empty where
   guaranteed — e.g. `systemd_units()` must contain `-.mount`), not exact values.
 - **Acceptance test** (`at_home()` only): the ubuntu-security-status
-  reproduction script, compared to the live tool.
+  reproduction script, compared to the live tool via
+  `pro security-status --format json`. This comparison is a local
+  acceptance gate only — never a normal package-check or CI dependency;
+  R CMD check and CI run fixture-only.
 
 ## Out of scope for Phase 1
 
