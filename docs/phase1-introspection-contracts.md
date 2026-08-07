@@ -73,10 +73,15 @@ dpkg_installed()
 # data.frame: package, version, architecture, status
 #   status: "installed" | "config-files" | ... (dpkg status word, verbatim)
 
-apt_candidates(packages = NULL)
-# data.frame: package, architecture, installed, candidate
-#   installed/candidate: version strings; NA when absent
-#   packages = NULL means all known to the cache
+apt_candidates(packages)
+# packages: character vector of package names, length >= 1, like
+#   apt_origins (packages = NULL reserved for the native libapt backend).
+#   (Amended 2026-08-07; was packages = NULL with an architecture column.)
+# data.frame: package, installed, candidate
+#   package echoes the queried spelling (name, or name:arch for non-native
+#   architectures); the bridge cannot attribute an architecture column
+#   honestly, so it returns with the native backend. Version columns are
+#   NA where apt reports (none). Unknown names yield zero rows.
 
 apt_upgradable()
 # data.frame: package, architecture, installed, candidate,
@@ -172,6 +177,15 @@ read-only, injectable runners, native-shaped return types).
 Done means: a short R script using only rdpkg exported functions reproduces,
 on this machine, the package counts ubuntu-security-status reports (packages by
 origin class, ESM-eligible counts), validated against the live tool's output.
+
+**Status: met 2026-08-07.** rdpkg's acceptance test mirrors uaclient's
+classifier (`get_origin_for_installed_package`: installed version's sources
+in order; candidate fallback when the installed version is status-only;
+first Ubuntu source's component wins) from `dpkg_installed()` +
+`apt_origins()` + `apt_candidates()` with the explicit installed-package
+vector, and matches `pro security-status --format json` bucket-for-bucket
+(main+restricted, universe+multiverse, third-party, unknown, total). The
+all-known-packages form stays reserved for the native libapt backend.
 
 The origin-classification table is extracted **mechanically** from the tool's
 source with bonsaisitter + treesitter.python — verified working today:
