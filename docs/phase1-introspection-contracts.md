@@ -132,15 +132,31 @@ apt_origins(packages)
 #   joined against chunked per-package calls (1000 names per invocation).
 
 apt_policy(package)
-# list: package, installed, candidate, pins (data.frame: version, priority,
-#   origin, site, suite, component)
+# Single-package diagnostic view. Differentiation from the bulk views
+# (clarified 2026-08-07): apt_origins() gives per-source rows without pin
+# state; apt_candidates() gives resolution results; apt_policy() explains
+# WHY resolution went that way for one package — the package pin when
+# present, and each version's EFFECTIVE priority (the number pins alter,
+# distinct from per-source pin priorities; can be negative, e.g. -1 for
+# pinned-out versions), alongside the sources.
+# list: package, installed, candidate,
+#       pin (version string; NA when no "Package pin:" is reported),
+#       versions (data.frame: version, version_priority (effective,
+#       integer), priority (source), origin, site, suite, component,
+#       installed)
+# Unknown package: an error (class rdpkg_unknown_package) — a diagnostic
+# view of nothing is a question answered "no such package", unlike the
+# bulk views' zero-row semantics.
 
 apt_cache_timestamps()
 # Read-only status query. (Renamed from apt_cache_updated 2026-08-07 so the
 # name cannot read as a verb: nothing in Phase 1 refreshes the apt cache -
 # cache refresh is a mutation and belongs to Phase 2.)
-# list: lists_updated (POSIXct — newest /var/lib/apt/lists stamp),
+# list: lists_updated (POSIXct — newest /var/lib/apt/lists stamp; NA when
+#       the directory holds no index stamps, i.e. never updated),
 #       status_changed (POSIXct — dpkg status mtime)
+# Paths are arguments with system defaults so tests inject fixtures;
+# a missing path is an error, never NA.
 ```
 
 Origin classification (which origins count as Ubuntu main vs universe vs
@@ -160,10 +176,19 @@ systemd_unit_info(unit)
 #   unit, description, load_state, active_state, sub_state, unit_file_state,
 #   fragment_path, active_enter_time (POSIXct), main_pid (integer),
 #   memory_current (numeric bytes, NA if unset), restarts (integer)
+# Bridge notes (2026-08-07): systemctl show key=value with the runner
+# forcing LC_ALL=C and TZ=UTC, so timestamps parse deterministically as
+# "%a %Y-%m-%d %H:%M:%S UTC" ("n/a" or empty means NA). MainPID=0 means
+# NA; MemoryCurrent "[not set]" means NA. A not-found unit RETURNS its
+# record (load_state "not-found") — absence of a unit is data here, not
+# an error.
 
 systemd_timers()
 # data.frame: timer, next_elapse (POSIXct), last_trigger (POSIXct),
 #             activates, active_state
+# Aggregation (2026-08-07): list-timers --output=json carries usec-epoch
+# numbers (null means NA) but no unit state; active_state is joined from
+# systemd_units(). Two backend calls, both JSON.
 
 systemd_journal(unit = NULL, priority = NULL, since = NULL,
                 until = NULL, n = 1000L)
@@ -173,6 +198,10 @@ systemd_journal(unit = NULL, priority = NULL, since = NULL,
 
 systemd_state()
 # list: state ("running" | "degraded" | ...), failed_units (character vector)
+# Aggregation (2026-08-07): `systemctl is-system-running` exits non-zero
+# whenever the word is not "running" — for this one command the exit code
+# is data, not an error; the word is taken from stdout regardless.
+# failed_units aggregates systemd_units() rows with active_state "failed".
 ```
 
 ## Backend candidates (decision deferred, per constraint 4)
@@ -251,6 +280,20 @@ analysis for the native backends will want that resolved, with treesitter.cpp
   `pro security-status --format json`. This comparison is a local
   acceptance gate only — never a normal package-check or CI dependency;
   R CMD check and CI run fixture-only.
+
+## Cross-package acceptance and the completion gate (recorded 2026-08-07)
+
+Cross-package acceptance tests live in the umbrella repo's
+`integration-tests/` directory (subsystem packages must not depend on each
+other), mirroring PLAN.md's first concrete milestone: upgradable packages,
+failed units, and error-priority journal entries retrieved in one script
+from both packages.
+
+**Phase 1 completion gate**: Phase 1 is not complete until `rctl --json`
+ships with **versioned output schemas** and **machine-readable error
+envelopes** (schema version, ok/error discriminator, error class,
+retryability, affected resource) — a thin pretty-printing wrapper does not
+satisfy the agent-facing design section above.
 
 ## Out of scope for Phase 1
 
