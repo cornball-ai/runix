@@ -73,16 +73,33 @@ dpkg_installed()
 # data.frame: package, version, architecture, status
 #   status: "installed" | "config-files" | ... (dpkg status word, verbatim)
 
-apt_candidates(packages = NULL)
-# data.frame: package, architecture, installed, candidate
-#   installed/candidate: version strings; NA when absent
-#   packages = NULL means all known to the cache
+apt_candidates(packages)
+# packages: character vector of package names, length >= 1, like
+#   apt_origins (packages = NULL reserved for the native libapt backend).
+#   (Amended 2026-08-07; was packages = NULL with an architecture column.)
+# data.frame: package, installed, candidate
+#   package echoes the queried spelling (name, or name:arch for non-native
+#   architectures); the bridge cannot attribute an architecture column
+#   honestly, so it returns with the native backend. Version columns are
+#   NA where apt reports (none). Unknown names yield zero rows.
 
 apt_upgradable()
-# data.frame: package, architecture, installed, candidate,
-#             origin, site, suite, component, security
-#   security: logical — candidate comes from a security pocket/origin
-#   One row per upgradable package (candidate != installed)
+# data.frame: package, installed, candidate, origin, site, suite,
+#             component, security, phased_percent
+#   Semantics: one row per installed package whose candidate version
+#   differs from the installed version — "candidate-available".
+#   Actionability (phasing cohort membership, dpkg holds, dependency
+#   holds) is deliberately NOT decided here: phased_percent (integer, NA
+#   when unannotated) and the origin columns give callers the data, and
+#   an "actually actionable" plan query belongs to Phase 2 alongside
+#   mutations. origin/site/suite/component describe the candidate
+#   version's best source; security: logical, candidate served from a
+#   security pocket. package echoes the queried name/name:arch spelling;
+#   architecture column deferred to the native backend like
+#   apt_candidates. Bridge mechanism: composed from dpkg_installed() +
+#   apt_candidates() + apt_origins() — no new parser. (Amended
+#   2026-08-07: dropped architecture, added phased_percent, pinned
+#   candidate-available semantics.)
 
 apt_origins(packages)
 # packages: character vector of package names, length >= 1. The
@@ -110,7 +127,10 @@ apt_policy(package)
 # list: package, installed, candidate, pins (data.frame: version, priority,
 #   origin, site, suite, component)
 
-apt_cache_updated()
+apt_cache_timestamps()
+# Read-only status query. (Renamed from apt_cache_updated 2026-08-07 so the
+# name cannot read as a verb: nothing in Phase 1 refreshes the apt cache -
+# cache refresh is a mutation and belongs to Phase 2.)
 # list: lists_updated (POSIXct — newest /var/lib/apt/lists stamp),
 #       status_changed (POSIXct — dpkg status mtime)
 ```
@@ -173,6 +193,15 @@ Done means: a short R script using only rdpkg exported functions reproduces,
 on this machine, the package counts ubuntu-security-status reports (packages by
 origin class, ESM-eligible counts), validated against the live tool's output.
 
+**Status: met 2026-08-07.** rdpkg's acceptance test mirrors uaclient's
+classifier (`get_origin_for_installed_package`: installed version's sources
+in order; candidate fallback when the installed version is status-only;
+first Ubuntu source's component wins) from `dpkg_installed()` +
+`apt_origins()` + `apt_candidates()` with the explicit installed-package
+vector, and matches `pro security-status --format json` bucket-for-bucket
+(main+restricted, universe+multiverse, third-party, unknown, total). The
+all-known-packages form stays reserved for the native libapt backend.
+
 The origin-classification table is extracted **mechanically** from the tool's
 source with bonsaisitter + treesitter.python — verified working today:
 
@@ -210,7 +239,10 @@ analysis for the native backends will want that resolved, with treesitter.cpp
   this machine and asserts invariants (columns, types, non-empty where
   guaranteed — e.g. `systemd_units()` must contain `-.mount`), not exact values.
 - **Acceptance test** (`at_home()` only): the ubuntu-security-status
-  reproduction script, compared to the live tool.
+  reproduction script, compared to the live tool via
+  `pro security-status --format json`. This comparison is a local
+  acceptance gate only — never a normal package-check or CI dependency;
+  R CMD check and CI run fixture-only.
 
 ## Out of scope for Phase 1
 
