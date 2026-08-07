@@ -66,10 +66,27 @@ apt_upgradable()
 #   security: logical — candidate comes from a security pocket/origin
 #   One row per upgradable package (candidate != installed)
 
-apt_origins(packages = NULL)
-# data.frame: package, version, origin, site, suite, component, trusted
-#   One row per (package, available version, origin) — the raw material for
-#   any origin classification (main/universe/ESM/PPA/third-party)
+apt_origins(packages)
+# packages: character vector of package names, length >= 1. The
+#   all-known-packages form (packages = NULL) is reserved for the native
+#   libapt backend — the CLI bridge cannot enumerate the archive without
+#   abusing the command line. (Amended 2026-08-07; was packages = NULL.)
+# data.frame: package, version, priority, origin, site, suite, component,
+#             installed
+#   One row per (package, available version, source) — the raw material for
+#   any origin classification (main/universe/ESM/PPA/third-party).
+#   origin is apt's Origin label (o=..., e.g. "Ubuntu"). The dpkg status
+#   pseudo-source has origin "", site "", suite "now", component "".
+#   installed marks the version table's *** row; priority is the source's
+#   pin priority (can be negative, e.g. -1 for versions absent from any
+#   archive). trusted is dropped from the bridge contract — apt-cache
+#   policy does not expose it; it returns with the native backend.
+#   Unknown package names yield zero rows, not an error (the bridge only
+#   reports them on stderr); callers needing existence checks join against
+#   dpkg_installed() or apt_candidates().
+#   Bridge mechanism: one global `apt-cache policy` call provides the
+#   release-field lookup (URI + dist + arch -> origin/suite/component),
+#   joined against chunked per-package calls (1000 names per invocation).
 
 apt_policy(package)
 # list: package, installed, candidate, pins (data.frame: version, priority,
