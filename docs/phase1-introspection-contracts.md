@@ -45,6 +45,24 @@ Shared conventions live in this doc, not in a shared package (no premature
 - Backend functions are injectable: each package has an
   internal runner the tests replace with fakes; exported functions never call
   `system2()` directly.
+- Functional style (recorded 2026-08-07): **functional core → imperative
+  system boundary.** R shapes Runix toward a functional, data-oriented
+  public API without pretending the operating system is functional.
+  Concretely:
+  - plain data frames/lists for observations (packages, units, devices,
+    interfaces);
+  - explicit verbs for effects (`systemd_restart()`, `apt_install()`,
+    `netplan_apply()` — later phases), each returning a structured result
+    object;
+  - pure parsers and validators separated from runners and native calls;
+  - immutable-style configuration objects, typed conditions for failures
+    (parse, authorization, missing tools);
+  - S3 for lightweight semantics; R6/environments reserved for genuinely
+    stateful resources (D-Bus connections, subscriptions, event monitors);
+  - no Python-style class hierarchies or everything-is-an-object APIs —
+    when replacing a Python tool, re-express its classes as function
+    pipelines over these data frames (ubuntu-security-status is the first
+    test of this).
 - No masking of base names; no non-base dependencies in Imports beyond what
   the chosen backend forces (target: zero).
 
