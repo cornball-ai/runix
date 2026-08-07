@@ -96,8 +96,16 @@ apt_upgradable()
 #   version's best source; security: logical, candidate served from a
 #   security pocket. package echoes the queried name/name:arch spelling;
 #   architecture column deferred to the native backend like
-#   apt_candidates. Bridge mechanism: composed from dpkg_installed() +
-#   apt_candidates() + apt_origins() — no new parser. (Amended
+#   apt_candidates.
+#   phased_percent semantics (stable): the archive's
+#   Phased-Update-Percentage annotation on the candidate version
+#   ("(phased N%)" in policy output), integer 0-100, NA when unannotated,
+#   passed through from apt verbatim. It describes archive-side rollout
+#   state, NOT this machine's cohort membership — cohort membership and
+#   actionability are Phase 2 planning semantics, distinct by design from
+#   candidate-available.
+#   Bridge mechanism: a single pass over the same bridge parsers used by
+#   dpkg_installed/apt_candidates/apt_origins — no new parser. (Amended
 #   2026-08-07: dropped architecture, added phased_percent, pinned
 #   candidate-available semantics.)
 
@@ -293,6 +301,32 @@ Suggests-level, never Imports/SystemRequirements for the NM path).
 **rpolkit** exposes authorization/policy integration when something needs
 explicit `CheckAuthorization`; service-level authorization (the target
 daemon's own polkit checks) remains the primary mechanism where available.
+
+## Agent-facing design (recorded 2026-08-07)
+
+Runix must be easy for AI agents and orchestration harnesses (the public
+corteza runtime among them) to drive through stable machine interfaces,
+without private coupling. These requirements are orthogonal to the
+subsystem packages and bind the whole stack:
+
+- deterministic structured results with versioned schemas;
+- `rctl` emits JSON in data mode with **no human text mixed into data
+  output** — prose goes to stderr or human mode only;
+- structured, typed errors carrying retryability and the affected
+  resources;
+- explicit capability/introspection commands (what can this host do,
+  which subsystems are present, which verbs are available);
+- bounded timeouts, cancellation, and injectable runners throughout;
+- no implicit prompts and no interactive authentication in machine mode;
+- read-only operations are the default posture;
+- mutations require explicit verbs with previews/dry-runs, idempotence,
+  and audit records;
+- arbitrary R evaluation is **never** a privilege mechanism.
+
+Division of labor: rdpkg, rsystemd, and later subsystem packages expose
+deterministic R APIs (this contract); `rctl --json` and a future agent
+protocol adapt those APIs for automation. Orchestrators — corteza-based
+agents and other harnesses — drive the public interfaces only.
 
 **rctl launcher (recorded 2026-08-07)**: littler (`r`) is the CLI launcher —
 fast startup, conventional Unix command behavior — and nothing more:
