@@ -160,22 +160,34 @@ concurrent writers on the same host (include host+pid entropy).
   memory and written in one `write()` to a descriptor opened `O_APPEND`. No
   partially-written lines, no interleaving of a line with another writer's.
 - **fsync before the claim.** For any record whose companion effect was or
-  will be issued, the sink is `fsync`d (and the directory entry `fsync`d on
-  first create) **before** the mutation returns a result that claims
-  `audit_persisted = TRUE`. The durable record precedes the caller learning
-  the effect happened. A `durability` policy knob (`fsync` default, `flush`,
-  `none`) exists for high-frequency non-effect records, but effect-issuing
-  paths default to `fsync` and downgrading them is an explicit operator
-  choice.
+  will be issued, the file is `fsync`d, and the **parent directory** is
+  `fsync`d after a create or a rotation (so the new/renamed entry is durable,
+  not just the file's data), **before** the mutation returns a result that
+  claims `audit_persisted = TRUE`. The durable record precedes the caller
+  learning the effect happened. A `durability` policy knob (`fsync` default,
+  `flush`, `none`) exists for high-frequency non-effect records, but
+  effect-issuing paths default to `fsync` and downgrading them is an explicit
+  operator choice. The lock is held across the append and both fsyncs.
+- **Implementation (v1).** fsync is coreutils `sync --data <file>`
+  (fdatasync) for the file and `sync <dir>` (fsync) for the parent directory;
+  see "External requirements". The injectable `syncer`/`dir_syncer` leave
+  room for a native routine (see "Where this lives").
 
 ## Concurrent writers
 
 Multiple agents (separate R processes) may write one sink.
 
-- The append + fsync critical section is guarded by an advisory `flock`
-  (`LOCK_EX`) on the sink, because a full JSONL line can exceed the
-  atomic-`write` size (`PIPE_BUF`) and `O_APPEND` alone then does not
-  guarantee non-interleaving.
+- The append + fsync critical section is guarded by an advisory lock, because
+  a full JSONL line can exceed the atomic-`write` size (`PIPE_BUF`) and
+  `O_APPEND` alone then does not guarantee non-interleaving. The v1 lock is
+  an atomic `mkdir` lock (portable base R); a native `flock` is a valid later
+  substitute.
+- **Stale-lock recovery is reboot- and PID-reuse-safe.** The lock owner
+  records `pid` + boot id + process start time. Staleness treats a different
+  boot id (the machine rebooted) or a live pid whose start time differs (the
+  PID was reused) as a dead owner, so a recycled PID never protects a stale
+  lock. Where `/proc` is absent the check degrades to an mtime timeout only
+  (documented, not silent).
 - Records carry `host` + `pid` + `correlation_id`, so concurrent writers
   remain distinguishable even if two attempts race.
 - One sink file per host. Shared/networked-filesystem sinks are out of scope
@@ -195,6 +207,62 @@ The sink records who did what as root; it is security-sensitive.
 - On open, verify the sink is not world-writable and not a symlink to
   somewhere unexpected; refuse to write to a hijackable sink and raise
   `runix_audit_error` rather than append to it.
+
+## Authority matrix: who can durably write which sink
+
+The durable-intent guarantee is only as strong as the caller's ability to
+write the sink. An unprivileged R process that systemd's polkit authorizes to
+restart a **system** unit still cannot append to a root-owned
+`/var/log/runix/audit.jsonl` (mode `0640`). The guarantee would fail on
+exactly the normal privilege path. So the sink is chosen by who is running and
+at what scope, and the result reports the audit's authority honestly. **This
+must be settled before the rsystemd integration can claim to satisfy this
+contract for system scope.**
+
+| Caller / scope | Sink | Guarantee |
+|---|---|---|
+| root process | system sink (`/var/log/runix/audit.jsonl`) directly | strong: system-durable |
+| user-scope mutation (`--user`) | caller-owned XDG sink (`$XDG_STATE_HOME/runix/audit.jsonl`) | strong for that scope |
+| unprivileged caller, system-scope mutation | privileged broker → system sink; else caller-owned XDG sink | strong only via the broker; otherwise an explicitly weaker caller-owned guarantee |
+
+The unprivileged-system-scope row is the decision:
+
+- **Broker (strong).** A small privileged writer (rapt-shaped: a root helper
+  behind a local socket) receives the record, derives the actor from the
+  peer's process credentials (`SO_PEERCRED`), validates it against the schema,
+  and appends to the system sink. It **never** accepts a caller-supplied
+  destination path (the broker owns the path) and does nothing but append.
+  This is the only way an unprivileged caller gets a system-durable audit.
+- **Weaker caller-owned (no new privileged component).** The caller writes its
+  own XDG sink; the record is durable there but **not** in the system sink.
+  The result must then report a weaker authority so a system-scope mutation is
+  never misrepresented as system-durably audited.
+
+**Recommendation for v1 (open for ratification):** ship the weaker
+caller-owned guarantee with an honest `audit_scope`, and add the broker when a
+system-durable audit is actually required. The broker can share the apt
+boundary's pkexec/polkit helper, which already runs privileged.
+
+**Honesty field.** The result and record carry `audit_scope`
+(`"system"` | `"caller"` | `"user"`): where the record was durably written and
+under whose authority. `audit_persisted = TRUE` with `audit_scope = "caller"`
+for a system-scope effect means the attempt is durable in the caller's sink,
+not the system's, and must be read that way. It is never a system-durable
+claim.
+
+## External requirements (declared)
+
+Zero R-package dependencies, but real system requirements on the durability
+path, declared in `DESCRIPTION` `SystemRequirements`:
+
+- coreutils `sync` for `fsync`/`fdatasync` of the file and the parent
+  directory;
+- Linux procfs (`/proc`) for lock-owner liveness, boot id, and process start
+  time.
+
+Where `/proc` is absent (non-Linux), lock staleness degrades to the mtime
+timeout only and reboot/PID-reuse detection is unavailable; this is a
+documented reduction, not a silent one.
 
 ## Rotation
 
@@ -253,6 +321,19 @@ deterministic JSON encoding pulls in a dependency, the encoder is injected
 so the core keeps its zero-dependency posture (the same encoder rctl already
 uses can be passed in).
 
+Implemented in v1 as `file_audit_sink` / `memory_audit_sink`,
+`audit_two_phase`, and `encode_json_line` (a base-R default encoder,
+injectable). The JSON encoder is deliberately **fail-closed on a narrow type
+surface**: it rejects unsupported classes, non-finite numbers, invalid UTF-8,
+duplicate object keys, and nesting beyond a bounded depth, rather than emit
+questionable output. Longer term, a small internal C routine for
+open/append/lock/fsync/parent-directory-fsync would be more trustworthy and
+portable than coordinating path-based coreutils calls; the injectable
+`syncer`/lock leave room for that swap, and the current base-R + coreutils
+implementation is a solid **user/local** sink. System-scope authority (the
+authority matrix) is the piece that must be settled before the sink is wired
+into system-scope mutations.
+
 ## Conformance tests
 
 Against an injectable sink (temp file) and injectable clock/fsync:
@@ -274,3 +355,12 @@ Against an injectable sink (temp file) and injectable clock/fsync:
 7. Rotation preserves every prior record and never truncates a live sink.
 8. `preview` writes exactly one record with `effect_issued = FALSE` and
    issues no effect.
+9. The encoder is fail-closed: unsupported classes, non-finite numbers,
+   invalid UTF-8, duplicate object keys, and over-deep nesting are rejected,
+   not emitted.
+10. A stale lock is stolen when the owner's boot id differs (reboot) or its
+    live PID's start time differs (PID reuse); a genuinely live owner's lock
+    is not stolen.
+11. `audit_scope` reflects authority: a system-scope effect whose record only
+    reached the caller's XDG sink reports `audit_scope = "caller"`, never a
+    system-durable claim (verified at the rsystemd integration).

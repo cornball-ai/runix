@@ -129,8 +129,13 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    **Sink implemented** in the `runix` core (`file_audit_sink`,
    `memory_audit_sink`, `audit_two_phase`, `encode_json_line`): append-only
    JSONL, advisory lock with stale recovery, fsync, rotation, perms/symlink
-   guards, fallback, honest `persisted`. Remaining: wire it into the rsystemd
-   (then apt) mutation paths so effects and error paths emit records.
+   guards, fallback, honest `persisted`. **Blocker before integration:** the
+   authority matrix (`durable-audit-contract.md`) — an unprivileged
+   polkit-authorized caller cannot write the root-owned system sink, so
+   system-scope needs a privileged broker or an explicitly weaker
+   caller-owned guarantee with an honest `audit_scope`. Remaining: settle that,
+   then wire the sink into the rsystemd (then apt) mutation paths so effects
+   and error paths emit records.
 2. **[U] General apt authorization.** rapt authorizes only r2u-allowlisted
    (`r-*`) installs; `apt_install("curl")` needs a separate security
    design (polkit / PackageKit / a broadened or second daemon path). This
