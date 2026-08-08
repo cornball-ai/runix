@@ -97,13 +97,18 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    with gap 4 for apt — the dpkg global lock means apt-mutation
    authorization and apt-mutation concurrency are one "apt mutation
    boundary" design, not two.
+   **Contract written:** `apt-mutation-boundary-contract.md` (pkexec/polkit
+   human gate, dpkg frontend lock with bounded wait, `correlation_id`,
+   partial-failure recovery); combines this with gap 3. rapt untouched.
 3. **[U] Mutation concurrency and locking.** Two agents mutating at once
    need explicit conflict/lock behavior and operation identity.
    **Note:** systemd already serializes its own jobs via PID 1 (two
    `systemctl restart`s queue), and our InvocationID gives operation
    identity — so the acute gap is apt (global dpkg lock), i.e. gap 2's
    boundary. Document systemd's inherited serialization explicitly; design
-   apt's.
+   apt's. **Contract written:** folded into
+   `apt-mutation-boundary-contract.md` (the dpkg-lock and concurrency
+   half); systemd's PID-1 serialization documented there as the asymmetry.
 4. **[N] CLI-bridge retirement plan.** Define the trigger for moving a
    subsystem from CLI parsing to native bindings (sd-bus / libapt via
    RcppAPT) and how backend behavior stays compatible. The injectable
@@ -126,8 +131,9 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    audit) — **contract written** (`durable-audit-contract.md`);
    implementation next, foundational for trustworthy mutations.
 4. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
-   authorization + concurrency/locking + operation identity, behind rapt or
-   a dedicated privileged path.
+   authorization + concurrency/locking + operation identity — **contract
+   written** (`apt-mutation-boundary-contract.md`), a dedicated
+   pkexec/polkit-gated helper, rapt left as-is.
 5. apt mutation implementation; then gaps 4–6 incrementally.
 
 ## Deferred decisions
