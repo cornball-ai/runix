@@ -274,3 +274,69 @@ if (at_home() && nzchar(Sys.which("r"))) {
         expect_silent(lapply(got, jsonlite::fromJSON))  # every line parses
     }
 }
+
+## --- audit_emit: one framed record with the shared correlation id ---
+me <- memory_audit_sink()
+re <- audit_emit(me, list(operation = "demo", outcome = "preview"),
+                 phase = "preview", correlation_id = "cid-1")
+expect_true(re$persisted)
+expect_equal(re$correlation_id, "cid-1")
+rec <- me$records()[[1]]
+expect_equal(rec$phase, "preview")
+expect_equal(rec$correlation_id, "cid-1")
+expect_equal(rec$schema_version, 1L)
+expect_false(is.null(rec$host))
+expect_false(is.null(rec$pid))
+expect_false(is.null(rec$time))
+
+## --- audit_two_phase on_error: rich error outcome + cid on the condition ---
+oe <- memory_audit_sink()
+cond <- tryCatch(
+    audit_two_phase(oe,
+        intent = list(operation = "x", outcome = "intent"),
+        effect = function(cid) runix_abort("boom", subclass = "demo_timeout",
+                                           data = list(observed = "activating")),
+        outcome = function(r) list(outcome = "ok"),
+        on_error = function(e, cid) list(outcome = "timeout",
+                                         effect_issued = TRUE,
+                                         observed = e$observed),
+        id_fn = function() "cid-oe"),
+    condition = function(c) c)
+expect_inherits(cond, "demo_timeout")             # original class survives
+expect_equal(cond$observed, "activating")         # original data survives
+expect_equal(cond$correlation_id, "cid-oe")       # cid attached to the error
+recs_oe <- oe$records()
+expect_equal(recs_oe[[1]]$phase, "intent")
+expect_equal(recs_oe[[2]]$phase, "outcome")
+expect_equal(recs_oe[[2]]$outcome, "timeout")     # rich, typed error outcome
+expect_equal(recs_oe[[2]]$observed, "activating")
+
+## --- authority resolution ---
+expect_equal(audit_scope_for("system", root = TRUE), "system")
+expect_equal(audit_scope_for("system", root = FALSE), "caller")
+expect_equal(audit_scope_for("user", root = FALSE), "user")
+expect_true(system_durable_audit_available(root = TRUE))
+expect_false(system_durable_audit_available(root = FALSE))
+expect_true(system_durable_audit_available(root = FALSE, broker = TRUE))
+
+## unprivileged system-scope -> caller-owned sink, honest about durability
+xdg <- file.path(td, "xdg")
+r_sys <- default_audit_sink("system", root = FALSE, xdg = xdg,
+                            durability = "none")
+expect_equal(r_sys$audit_scope, "caller")
+expect_false(r_sys$system_durable_audit)
+expect_true(grepl("runix/audit\\.jsonl$", r_sys$path))
+expect_true(r_sys$sink$write(list(operation = "x", outcome = "ok"))$persisted)
+expect_true(file.exists(r_sys$path))
+
+r_usr <- default_audit_sink("user", root = FALSE, xdg = xdg, durability = "none")
+expect_equal(r_usr$audit_scope, "user")
+
+r_root <- default_audit_sink("system", root = TRUE,
+                             system_dir = file.path(td, "sysroot"),
+                             durability = "none")
+expect_equal(r_root$audit_scope, "system")
+expect_true(r_root$system_durable_audit)
+
+## XDG resolution fails closed when there is no base to resolve
+expect_error(runix:::.xdg_audit_path(""), "cannot resolve")
