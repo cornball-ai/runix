@@ -14,6 +14,7 @@ file_audit_sink(
   lock_stale = 60,
   encoder = encode_json_line,
   syncer = .default_syncer,
+  dir_syncer = .default_dir_syncer,
   fallback = .default_fallback
 )
 }
@@ -43,6 +44,10 @@ considered stale and stolen.}
 
 \item{syncer}{\code{function(path)} that fsyncs the file, erroring on
 failure (default shells to coreutils \code{sync --data}).}
+
+\item{dir_syncer}{\code{function(dir)} that fsyncs the parent directory
+after a create or rotation (default shells to coreutils \code{sync}), so
+the new/renamed entry is durable, not just the file's data.}
 
 \item{fallback}{\code{function(record, reason)} best-effort emitter used
 when the primary write fails; must never claim durability.}

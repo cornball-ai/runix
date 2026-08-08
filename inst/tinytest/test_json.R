@@ -24,8 +24,22 @@ expect_equal(encode_json_line(list(t = t)), '{"t":"2026-08-08T12:00:00Z"}')
 expect_false(grepl("\n", encode_json_line(list(s = "a\nb")), fixed = TRUE))
 expect_false(grepl("\r", encode_json_line(list(s = "a\rb")), fixed = TRUE))
 
-## unsupported type errors rather than emitting something wrong
+## fail-closed surface: unsupported type, non-finite, duplicate keys, depth
 expect_error(encode_json_line(list(f = function() 1)))
+expect_error(encode_json_line(list(x = Inf)))
+expect_error(encode_json_line(list(x = NaN)))
+expect_error(encode_json_line(list(a = 1L, a = 2L)))   # duplicate object keys
+
+deep <- 1L
+for (i in 1:80) deep <- list(x = deep)
+expect_error(encode_json_line(deep, max_depth = 64L))  # too deep
+expect_false(grepl("\n",
+    encode_json_line(list(a = list(b = list(c = 1L)))), fixed = TRUE))  # ok depth
+
+## invalid UTF-8 is rejected, not emitted
+bad <- "\xff\xfe"
+Encoding(bad) <- "UTF-8"
+expect_error(encode_json_line(list(s = bad)))
 
 ## escaping round-trips through a real parser
 if (requireNamespace("jsonlite", quietly = TRUE)) {

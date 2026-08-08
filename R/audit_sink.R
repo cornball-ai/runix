@@ -29,6 +29,9 @@
 #'   \code{\link{encode_json_line}}; inject \code{yyjsonr} etc. if desired).
 #' @param syncer \code{function(path)} that fsyncs the file, erroring on
 #'   failure (default shells to coreutils \code{sync --data}).
+#' @param dir_syncer \code{function(dir)} that fsyncs the parent directory
+#'   after a create or rotation (default shells to coreutils \code{sync}), so
+#'   the new/renamed entry is durable, not just the file's data.
 #' @param fallback \code{function(record, reason)} best-effort emitter used
 #'   when the primary write fails; must never claim durability.
 #' @return A sink: \code{list(write, path, durability, kind)}.
@@ -42,11 +45,13 @@ file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
                             lock_timeout = 10, lock_stale = 60,
                             encoder = encode_json_line,
                             syncer = .default_syncer,
+                            dir_syncer = .default_dir_syncer,
                             fallback = .default_fallback) {
     durability <- match.arg(durability)
     force(path)
     force(encoder)
     force(syncer)
+    force(dir_syncer)
     force(fallback)
 
     write <- function(record) {
@@ -59,7 +64,8 @@ file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
         }
         res <- tryCatch(
                         .sink_append(path, line, durability, max_bytes, keep,
-                                     dir_mode, file_mode, lock_timeout, lock_stale, syncer),
+                                     dir_mode, file_mode, lock_timeout, lock_stale,
+                                     syncer, dir_syncer),
                         error = function(e) e)
         if (inherits(res, "condition")) {
             fallback(record, reason = conditionMessage(res))
@@ -107,11 +113,12 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
 ## --- the append critical section -------------------------------------------
 
 .sink_append <- function(path, line, durability, max_bytes, keep, dir_mode,
-                         file_mode, lock_timeout, lock_stale, syncer) {
-    .ensure_sink_ready(path, dir_mode, file_mode)
+                         file_mode, lock_timeout, lock_stale, syncer,
+                         dir_syncer) {
+    created <- .ensure_sink_ready(path, dir_mode, file_mode)
     lock <- .acquire_lock(path, lock_timeout, lock_stale)
     on.exit(.release_lock(lock), add = TRUE)
-    .maybe_rotate(path, max_bytes, keep, file_mode)
+    rotated <- .maybe_rotate(path, max_bytes, keep, file_mode)
     con <- file(path, open = "a", encoding = "UTF-8")
     tryCatch({
         writeLines(line, con, useBytes = TRUE)
@@ -119,6 +126,11 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
     }, finally = close(con))
     if (identical(durability, "fsync")) {
         syncer(path)
+        ## fsync the directory entry too, but only when it changed (create or
+        ## rotation); a plain append does not alter the parent directory.
+        if (isTRUE(created) || isTRUE(rotated)) {
+            dir_syncer(dirname(path))
+        }
     }
     invisible(TRUE)
 }
@@ -126,6 +138,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
 ## Create the sink dir/file with restrictive perms; refuse a symlink or a
 ## world-writable sink (hijack guard).
 .ensure_sink_ready <- function(path, dir_mode, file_mode) {
+    created <- FALSE
     dir <- dirname(path)
     if (!dir.exists(dir)) {
         dir.create(dir, recursive = TRUE, mode = dir_mode)
@@ -140,6 +153,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
                         data = list(resource = path))
         }
         Sys.chmod(path, mode = file_mode, use_umask = FALSE)
+        created <- TRUE
     }
     if (nzchar(Sys.readlink(path))) {
         runix_abort(paste0("audit sink is a symlink, refusing to write: ", path),
@@ -153,7 +167,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
                     subclass = "runix_audit_error",
                     data = list(resource = path))
     }
-    invisible(TRUE)
+    created
 }
 
 ## --- advisory lock (mkdir is atomic), with stale-owner recovery ------------
@@ -164,8 +178,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
     interval <- 0.02
     repeat {
         if (dir.create(lockdir, showWarnings = FALSE)) {
-            try(writeLines(as.character(Sys.getpid()),
-                           file.path(lockdir, "pid")), silent = TRUE)
+            .write_lock_owner(lockdir)
             return(list(dir = lockdir))
         }
         if (.lock_is_stale(lockdir, stale)) {
@@ -173,8 +186,8 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
             next
         }
         if (waited >= timeout) {
-            runix_abort(paste0("could not acquire audit lock within ", timeout,
-                               "s: ", lockdir),
+            runix_abort(paste0("could not acquire audit lock within ",
+                               timeout, "s: ", lockdir),
                         subclass = c("runix_audit_locked", "runix_audit_error"),
                         data = list(resource = path))
         }
@@ -191,17 +204,33 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
     invisible(NULL)
 }
 
-## A lock is stale if its recorded owner pid is provably gone, or (fallback)
-## if the lock dir is older than `stale` seconds. Pid-liveness uses /proc on
-## Linux; where that is unavailable the answer is "unknown" and only the age
-## test applies, so we never steal a fresh lock on non-Linux.
+## A lock is stale if its recorded owner is provably gone, or (fallback) if
+## the lock dir is older than `stale` seconds. Owner identity is pid + boot id
+## + process start time, so a reboot (different boot id) or PID reuse (a live
+## pid whose start time differs) is detected as a dead owner. Liveness/start
+## time use /proc on Linux; where unavailable the answer is "unknown" and only
+## the age test applies, so we never steal a fresh lock on non-Linux.
 .lock_is_stale <- function(lockdir, stale) {
-    pidfile <- file.path(lockdir, "pid")
-    if (file.exists(pidfile)) {
-        pid <- suppressWarnings(as.integer(readLines(pidfile, warn = FALSE)[1L]))
-        if (!is.na(pid) && identical(.pid_alive(pid), FALSE)) {
+    owner <- .read_lock_owner(lockdir)
+    if (!is.null(owner) && !is.na(owner$pid)) {
+        cur_boot <- .boot_id()
+        if (!is.na(cur_boot) && !is.na(owner$boot) &&
+            !identical(cur_boot, owner$boot)) {
+            return(TRUE) # machine rebooted since the lock was taken
+        }
+        alive <- .pid_alive(owner$pid)
+        if (identical(alive, FALSE)) {
             return(TRUE)
         }
+        if (identical(alive, TRUE)) {
+            st <- .proc_starttime(owner$pid)
+            if (!is.na(st) && !is.na(owner$starttime) &&
+                !identical(st, owner$starttime)) {
+                return(TRUE) # PID reused; the original owner is gone
+            }
+            return(FALSE) # genuinely held by a live owner
+        }
+        ## alive unknown (no /proc) -> fall through to the age test
     }
     info <- file.info(lockdir)
     if (is.na(info$mtime)) {
@@ -218,18 +247,102 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
     NA
 }
 
+## Owner identity written into the lock: "pid boot starttime" on one line,
+## with "-" for a value unavailable on this platform. boot id and start time
+## contain no spaces, so a space split is unambiguous.
+.write_lock_owner <- function(lockdir) {
+    val <- paste(Sys.getpid(), .dash(.boot_id()),
+                 .dash(.proc_starttime(Sys.getpid())))
+    try(writeLines(val, file.path(lockdir, "owner")), silent = TRUE)
+    invisible(NULL)
+}
+
+.read_lock_owner <- function(lockdir) {
+    f <- file.path(lockdir, "owner")
+    if (file.exists(f)) {
+        line <- tryCatch(readLines(f, warn = FALSE)[1L],
+                         error = function(e) NA_character_)
+        if (!is.na(line)) {
+            toks <- strsplit(line, " ", fixed = TRUE)[[1L]]
+            if (length(toks) >= 3L) {
+                return(list(
+                            pid = suppressWarnings(as.integer(toks[1L])),
+                            boot = if (identical(toks[2L], "-")) {
+                            NA_character_
+                        } else {
+                            toks[2L]
+                        },
+                            starttime = if (identical(toks[3L], "-")) {
+                            NA_character_
+                        } else {
+                            toks[3L]
+                        }))
+            }
+        }
+    }
+    ## Legacy pid-only lock (pre-hardening): degrade to pid liveness alone.
+    pf <- file.path(lockdir, "pid")
+    if (file.exists(pf)) {
+        pid <- suppressWarnings(as.integer(readLines(pf, warn = FALSE)[1L]))
+        return(list(pid = pid, boot = NA_character_, starttime = NA_character_))
+    }
+    NULL
+}
+
+.dash <- function(x) {
+    if (length(x) == 0L || is.na(x)) {
+        "-"
+    } else {
+        as.character(x)
+    }
+}
+
+## Boot id: stable per boot, changes on reboot. Linux only.
+.boot_id <- function() {
+    p <- "/proc/sys/kernel/random/boot_id"
+    if (file.exists(p)) {
+        tryCatch(readLines(p, warn = FALSE)[1L],
+                 error = function(e) NA_character_)
+    } else {
+        NA_character_
+    }
+}
+
+## Process start time (clock ticks since boot), field 22 of /proc/<pid>/stat.
+## The comm field (2) may contain spaces and parens, so parse after the last
+## ')': the remaining tokens start at field 3, so field 22 is token 20. Linux
+## only.
+.proc_starttime <- function(pid) {
+    p <- file.path("/proc", as.character(pid), "stat")
+    if (!file.exists(p)) {
+        return(NA_character_)
+    }
+    line <- tryCatch(readLines(p, warn = FALSE)[1L],
+                     error = function(e) NA_character_)
+    if (is.na(line)) {
+        return(NA_character_)
+    }
+    after <- sub("^.*\\) ", "", line)
+    toks <- strsplit(after, " ", fixed = TRUE)[[1L]]
+    if (length(toks) >= 20L) {
+        toks[20L]
+    } else {
+        NA_character_
+    }
+}
+
 ## --- rotation: rename-then-create, never truncate-in-place ------------------
 
 .maybe_rotate <- function(path, max_bytes, keep, file_mode) {
     if (!is.finite(max_bytes) || max_bytes <= 0) {
-        return(invisible())
+        return(FALSE)
     }
     if (!file.exists(path)) {
-        return(invisible())
+        return(FALSE)
     }
     sz <- file.info(path)$size
     if (is.na(sz) || sz < max_bytes) {
-        return(invisible())
+        return(FALSE)
     }
     oldest <- paste0(path, ".", keep)
     if (file.exists(oldest)) {
@@ -248,7 +361,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
     on.exit(Sys.umask(old), add = TRUE)
     file.create(path, showWarnings = FALSE)
     Sys.chmod(path, mode = file_mode, use_umask = FALSE)
-    invisible()
+    TRUE
 }
 
 ## --- fsync and fallback -----------------------------------------------------
@@ -261,6 +374,18 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
                                        stderr = FALSE))
     if (!identical(as.integer(status), 0L)) {
         stop("fsync via 'sync' failed for ", path, " (status ", status, ")")
+    }
+    invisible(TRUE)
+}
+
+## Full fsync of a directory (coreutils `sync <dir>`, not --data) so a created
+## or renamed entry is durable. Errors on failure.
+.default_dir_syncer <- function(dir) {
+    status <- suppressWarnings(
+                               system2("sync", shQuote(dir), stdout = FALSE, stderr = FALSE))
+    if (!identical(as.integer(status), 0L)) {
+        stop("directory fsync via 'sync' failed for ", dir, " (status ",
+             status, ")")
     }
     invisible(TRUE)
 }
