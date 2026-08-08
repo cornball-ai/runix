@@ -1,7 +1,8 @@
 # Audit broker contract
 
-Status: contract (pre-implementation). The strong resolution of the
-durable-audit authority matrix (`durable-audit-contract.md`): the privileged,
+Status: contract (pre-implementation; wire protocol pinned). The strong
+resolution of the durable-audit authority matrix
+(`durable-audit-contract.md`): the privileged,
 single-purpose component that lets an **unprivileged** system-scope mutation
 get a **system-durable** audit record. Its existence is what allows
 `system_durable_audit = TRUE` and, with it, honest autonomous fleet-wide
@@ -101,12 +102,73 @@ The broker path is a request/response protocol, not a drop-in file sink:
    The broker verifies the id exists and its intent actor matches this peer
    (req. 5), validates, and appends the outcome durably.
 
-**Integration note.** Because the broker mints the id (req. 4), the broker
-path does not fit `audit_two_phase`'s current cid-first, locally-minted flow
-unchanged: it needs a broker-backed adapter whose "open intent" call returns
-the id, or an `id_fn` sourced from the broker. That adapter is specified when
-the broker is built; the two-phase discipline and record schema are otherwise
-identical to the file sink.
+**Integration note.** The runix sink interface is now the receipt-based
+lifecycle (`open_intent(record) -> receipt`, `write_outcome(receipt, record)`;
+`durable-audit-contract.md`), and `audit_two_phase` mints the id via the
+sink. So the broker slots in as **another sink implementation**: an R
+`AF_UNIX` client whose `open_intent` sends the request and returns the
+broker-minted id in the receipt (with the opaque `binding`), and whose
+`write_outcome` sends the outcome with that receipt. No changes to
+`audit_two_phase` or the consumers; only the sink differs.
+
+## Wire protocol (pinned before implementation)
+
+The protocol is small, versioned, and rigid. It is fixed here so the C build
+implements a spec rather than inventing one.
+
+- **Framing.** Every message is a fixed header plus a body: a protocol
+  **version** byte and a big-endian **`uint32` length** prefix for the body,
+  which carries a **hard maximum** (e.g. 64 KiB). A length that is malformed,
+  exceeds the maximum, or does not match the bytes received is a typed error
+  and the connection is closed. Versioning lets the broker reject an
+  unsupported client rather than guess.
+- **Body: strict UTF-8 JSON**, parsed by an **existing, maintained, audited C
+  JSON library** with strict UTF-8 and size limits. **No hand-written
+  parser** (the parser is the largest attack surface; do not build one).
+- **Two request types only:** `open_intent` and `write_outcome`. Any other
+  type is a typed `unknown_request` error. There is no general command
+  channel.
+- **`SO_PEERCRED` overrides all payload identity.** The actor (uid/gid/pid)
+  comes from the kernel-verified peer credentials; any identity field in the
+  body is ignored and overwritten. A client cannot claim to be another
+  principal.
+- **The receipt `binding` is opaque and authorizes nothing.** It only lets the
+  broker match a `write_outcome` to its `open_intent` (and confirm the same
+  actor). It is not a capability: it cannot authorize a mutation, a different
+  intent, or any other action, and it is meaningless to the client beyond
+  echoing it back.
+- **Deterministic responses, typed protocol errors.** Each request yields
+  exactly one framed response of a fixed shape. Errors are a closed, typed
+  set (e.g. `bad_frame`, `too_large`, `bad_json`, `unknown_request`,
+  `schema_invalid`, `unknown_intent`, `actor_mismatch`, `rate_limited`,
+  `persist_failed`); the same input always yields the same response class.
+- **Disconnects never erase a durable intent.** Once `open_intent` has fsync'd
+  the intent and returned the receipt, the intent stands regardless of what
+  happens to the connection. A disconnect between intent and outcome leaves an
+  open intent (a queryable crash-gap), never a rollback.
+
+## Broker I/O and packaging
+
+- **Descriptor-based, hijack-safe writes.** Open the sink once with
+  `O_APPEND | O_NOFOLLOW | O_CLOEXEC` and hold the descriptor; never reopen by
+  path per write. `O_NOFOLLOW` refuses a symlinked sink at open; `O_APPEND`
+  gives atomic positioning.
+- **Advisory locking** (`flock(LOCK_EX)`) around the append+fsync critical
+  section, since a full JSONL line can exceed `PIPE_BUF`.
+- **Complete-write loops.** `write(2)` may write partially; loop until the
+  whole line is written, handling `EINTR`/`EAGAIN`. No assumption that one
+  `write` emits the whole record.
+- **`fdatasync` the file** after the append, and **fsync the parent
+  directory** after a create or rotation, before reporting `persisted`.
+- **Packaging.** A systemd **socket unit** (`runix-audit-broker.socket`) and a
+  socket-activated **service unit** with strong sandboxing:
+  `NoNewPrivileges`, `ProtectSystem=strict` with `ReadWritePaths=` limited to
+  the sink directory, `ProtectHome`, `PrivateTmp`, `RestrictAddressFamilies=AF_UNIX`,
+  a minimal `CapabilityBoundingSet`, a `SystemCallFilter` allowlist, and
+  `MemoryDenyWriteExecute`. The **production sink path is fixed** in the
+  service configuration; a **test-path override is process configuration**
+  (env/CLI/config to the broker process), **never a protocol input** — a
+  client can never tell the broker where to write.
 
 ## Relationship to the rest
 
@@ -139,3 +201,27 @@ credentials:
 9. The broker exposes no path that performs a mutation.
 10. With the broker present, `rctl capabilities` reports
     `system_durable_audit = TRUE`; absent, `FALSE`.
+
+Protocol and abuse tests (a lying or hostile client):
+
+11. **Malformed length** — a length prefix that lies (too small, too large,
+    or truncated relative to the bytes sent) is rejected, nothing written.
+12. **Oversized frame** — a body over the hard maximum is rejected before any
+    parse or write.
+13. **Invalid UTF-8** — a body that is not valid UTF-8 is rejected by the
+    parser, nothing written.
+14. **Schema confusion** — valid JSON of the wrong shape (missing/extra
+    fields, wrong types, a `write_outcome` shaped like an `open_intent`) is
+    rejected with `schema_invalid`.
+15. **Forged identity** — a payload claiming a different uid than
+    `SO_PEERCRED` is recorded under the `SO_PEERCRED` actor, not the claim.
+16. **Replayed receipt** — reusing a receipt/binding to close a different or
+    already-closed intent is rejected (`unknown_intent`/`actor_mismatch`),
+    with no duplicate or misattributed outcome.
+17. **Concurrent writers** — many clients interleaving produce only whole,
+    parseable lines, each outcome bound to its own intent.
+18. **Broker restart** — with socket activation, the broker exiting and
+    restarting loses no durable intent and serves new connections; open
+    intents from before the restart remain queryable.
+19. **Disconnect after intent** — a client that drops right after
+    `open_intent` returns leaves the intent durable and open, never erased.
