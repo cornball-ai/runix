@@ -110,6 +110,29 @@ operation and a resume cannot fabricate one. `approval_required` is a
 first-class terminal outcome, distinct from `unauthorized` (an actual denial)
 and from `ok`, and is surfaced in the envelope (see `rctl-json-contract.md`).
 
+**The `correlation_id` is an identifier, not a bearer token.** Possessing the
+id must never be sufficient to execute the operation. Resume is not "run the
+recorded plan"; it re-checks everything and only then proceeds. At resume
+time the helper revalidates:
+
+- **host and actor binding** — the resume is for the same host and the same
+  actor the intent recorded; a different principal cannot replay the id;
+- **authorization** — the polkit/approval check is run *again* at resume;
+  the intent record is not proof that authorization happened or still holds;
+- **operation parameters and preview hash** — the resumed operation must
+  match the recorded intent exactly (operation, resource, options), bound by
+  a hash of the computed plan, so an altered or substituted plan is refused;
+- **expiry/staleness** — intents carry a TTL; a resume past it is refused,
+  not silently honored;
+- **current pre-state** — the system is re-read; if it drifted since the
+  preview, the plan is stale and the resume is refused (the caller must
+  re-preview), never executed against a changed system.
+
+Any of these failing yields a typed refusal (`runix_unauthorized` for the
+authz failures, `runix_stale_approval` for expiry/drift/parameter mismatch),
+audited like any other outcome. The intent audit makes the workflow
+auditable; it does not replace re-authorization at resume.
+
 ## Global lock and concurrency
 
 There is one system-wide apt/dpkg mutation lock (the dpkg frontend lock).
@@ -191,6 +214,9 @@ state that later apt operations refuse to proceed past.
   failure (terminal; carries the tool's diagnostic).
 - `runix_dpkg_broken` — post-effect broken/half-configured state (terminal;
   carries the recovery hint).
+- `runix_stale_approval` — a resume failed revalidation (expiry, pre-state
+  drift, or parameter/preview-hash mismatch); terminal, the caller must
+  re-preview. Authorization failures at resume are `runix_unauthorized`.
 
 All inherit `runix_error` via `runix::runix_abort()`; all mutation attempts,
 including every one of these, emit durable audit records per the two-phase
@@ -238,3 +264,9 @@ Against an injectable runner, lock, and audit sink:
    `correlation_id`.
 8. The intent/outcome audit pair shares one `correlation_id`; an
    un-persistable intent aborts before any effect.
+9. Resume revalidation: a resume with a valid `correlation_id` is refused,
+   not executed, when (a) the actor or host differs, (b) authorization no
+   longer holds, (c) the parameters/preview-hash differ, (d) the intent has
+   expired, or (e) the pre-state drifted since the preview. Only a resume
+   that passes all five proceeds. Possession of the id alone never executes
+   the operation.
