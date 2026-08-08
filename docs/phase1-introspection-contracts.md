@@ -305,8 +305,14 @@ candidate, needs Phase 2/3 first); packaging/distribution (Phase 6).
 
 1. **Package name: pkgstate.** Read-only, scope stated explicitly: dpkg
    status/database plus apt metadata queries (candidates, origins,
-   upgradeability). Mutations stay in rapt; no `rapt.query`; rapt's
+   upgradeability). Mutations stay out of pkgstate; no `rapt.query`; rapt's
    dependency surface does not grow.
+   **Amended 2026-08-08:** "mutations stay in rapt" originally meant only
+   that pkgstate performs no mutations and rapt's surface does not grow, both
+   still true. General apt mutations now live in a **separate sibling
+   package** under `apt-mutation-boundary-contract.md`; rapt (the r2u
+   `r-*` binary install backend) is left untouched and is **not** the
+   general-apt authorizer.
 2. **Repositories: top-level `~/pkgstate` and `~/rsystemd`**, matching the
    independent-package architecture — no later repository split. Local-only
    for now (no GitHub); work happens on feature branches over the skeleton
@@ -395,4 +401,6 @@ fixtures are committed artifacts, not build-time products.
   OS_type: unix, tinytest wired, installs and tests clean).
 - `~/rsystemd` — systemd read APIs. Same scaffold, same date.
 - Neither package depends on the other; both are governed by this contract.
-  rapt is unchanged and owns all apt mutations.
+  rapt is unchanged (the r2u `r-*` install backend); general apt mutations
+  live in a separate sibling package under `apt-mutation-boundary-contract.md`,
+  not rapt.
