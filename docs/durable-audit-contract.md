@@ -225,23 +225,34 @@ contract for system scope.**
 | user-scope mutation (`--user`) | caller-owned XDG sink (`$XDG_STATE_HOME/runix/audit.jsonl`) | strong for that scope |
 | unprivileged caller, system-scope mutation | privileged broker → system sink; else caller-owned XDG sink | strong only via the broker; otherwise an explicitly weaker caller-owned guarantee |
 
-The unprivileged-system-scope row is the decision:
+The unprivileged-system-scope row has two possible resolutions:
 
-- **Broker (strong).** A small privileged writer (rapt-shaped: a root helper
-  behind a local socket) receives the record, derives the actor from the
-  peer's process credentials (`SO_PEERCRED`), validates it against the schema,
-  and appends to the system sink. It **never** accepts a caller-supplied
-  destination path (the broker owns the path) and does nothing but append.
-  This is the only way an unprivileged caller gets a system-durable audit.
+- **Broker (strong).** A small privileged writer receives the record, derives
+  the actor from the peer's process credentials (`SO_PEERCRED`), validates it
+  against the schema, and appends to the system sink. It **never** accepts a
+  caller-supplied destination path (the broker owns the path) and does
+  nothing but append. This is the only way an unprivileged caller gets a
+  system-durable audit. It is a separate component with its own contract, not
+  a reuse of any mutation helper (see "The audit broker" below).
 - **Weaker caller-owned (no new privileged component).** The caller writes its
   own XDG sink; the record is durable there but **not** in the system sink.
-  The result must then report a weaker authority so a system-scope mutation is
-  never misrepresented as system-durably audited.
 
-**Recommendation for v1 (open for ratification):** ship the weaker
-caller-owned guarantee with an honest `audit_scope`, and add the broker when a
-system-durable audit is actually required. The broker can share the apt
-boundary's pkexec/polkit helper, which already runs privileged.
+**Ratified for v1 (2026-08-08): the weaker caller-owned sink, made an explicit
+capability rather than a hidden downgrade.** For an unprivileged system-scope
+mutation:
+
+- write to the caller-owned sink;
+- report `audit_scope = "caller"` on the result and record;
+- advertise `system_durable_audit = FALSE` through `rctl capabilities`
+  (`rctl-json-contract.md`);
+- let the fleet policy **refuse** the mutation unless system-durable audit is
+  available;
+- never describe this path as satisfying the strong system-audit guarantee.
+
+This lets local/manual rsystemd integration proceed now without prematurely
+adding another privileged service. **Autonomous, fleet-wide system mutation
+stays disabled by policy until the strong broker exists**; the broker is the
+gate that turns it on.
 
 **Honesty field.** The result and record carry `audit_scope`
 (`"system"` | `"caller"` | `"user"`): where the record was durably written and
@@ -249,6 +260,31 @@ under whose authority. `audit_persisted = TRUE` with `audit_scope = "caller"`
 for a system-scope effect means the attempt is durable in the caller's sink,
 not the system's, and must be read that way. It is never a system-durable
 claim.
+
+## The audit broker (separate contract)
+
+The strong path for unprivileged system-scope audit is a **dedicated** broker,
+**not** the apt boundary's `pkexec` helper. The two have different jobs and
+must not be merged: the apt helper performs an *authorized mutation*, while an
+audit broker only *appends validated records*. Combining them enlarges both
+privilege surfaces, and the apt helper's `pkexec` password prompt would
+undermine autonomous systemd operation (an agent restarting a service must not
+be forced through a password prompt to record the audit).
+
+Requirements, to be specified in its own `audit-broker-contract.md` before
+implementation:
+
+- append-only and credential-aware: actor derived from `SO_PEERCRED`, never
+  from the payload;
+- schema-validated records; caller-supplied destination paths rejected (the
+  broker owns the path);
+- does nothing but append (no mutation, no arbitrary I/O);
+- an option to evaluate: **journald** as a weaker, already-present broker
+  (structured records via the journal), traded off against a purpose-built
+  socket writer.
+
+Until it exists, autonomous fleet-wide system mutation is disabled by policy
+and unprivileged system-scope mutations use the caller-owned sink above.
 
 ## External requirements (declared)
 
