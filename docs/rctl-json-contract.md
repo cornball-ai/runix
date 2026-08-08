@@ -89,7 +89,11 @@ machine mode never blocks on an interactive password (see
 `apt-mutation-boundary-contract.md`). It returns exit code 4 with an
 error-shaped envelope whose class is `runix_approval_required`, carrying the
 operation identity (`correlation_id`) and the computed preview, and issues no
-effect. This is neither a failure nor a denial: `runix_unauthorized` (exit 1)
+effect. The `correlation_id` is an identifier, not a bearer token: it names
+the operation for approval and audit, but resume revalidates authorization,
+host/actor binding, parameters/preview hash, expiry, and pre-state before
+executing (`apt-mutation-boundary-contract.md`), so holding it authorizes
+nothing. This is neither a failure nor a denial: `runix_unauthorized` (exit 1)
 is an actual polkit denial, while `runix_approval_required` (exit 4) is a
 well-formed request pending sign-off, resumable by identity. It rides the
 existing error-envelope shape, so a consumer that does not recognize the

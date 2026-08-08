@@ -98,6 +98,13 @@ operation, and the authorized resume attaches its outcome record to the same
 outcome, as usual; a never-approved one is an intent that stays open, which is
 an honest, queryable state rather than a silent effect.
 
+The `correlation_id` is an **identifier, not a capability**: it makes the
+operation auditable and joinable, but possessing it authorizes nothing. The
+resume path re-checks host/actor binding, authorization, parameters and
+preview hash, expiry, and current pre-state before proceeding
+(`apt-mutation-boundary-contract.md`); the intent record is not a bearer
+token and is never treated as proof that authorization happened.
+
 ## Record schema (persisted line)
 
 Append-only JSONL: one JSON object per line, deterministic key order,

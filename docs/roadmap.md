@@ -88,8 +88,12 @@ authorizes out of band, and the operation is resumed by identity. The
 interactive `pkexec`/polkit password prompt is for a human at a terminal,
 never for an agent in `--json` mode. The durable **intent** record (written
 before anything is issued) is what makes "approve later, resume by id"
-sound: the attempt is on disk before it can proceed. Gap 2 (apt mutation
-boundary) is where this becomes a concrete contract for the install path.
+sound: the attempt is on disk before it can proceed. The `correlation_id` is
+an identifier, not a bearer token: resume revalidates authorization,
+host/actor binding, parameters/preview hash, expiry, and pre-state, so a
+stale preview is never executed just because someone holds its id. Gap 2 (apt
+mutation boundary) is where this becomes a concrete contract for the install
+path.
 
 ## Built so far
 
