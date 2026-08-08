@@ -69,7 +69,11 @@ contract for the install/remove path.
   enable/disable) with preview, idempotence, job correlation, timeout/
   cancellation, service-level authz, per-outcome audit; surfaced through
   `rctl services.*`.
-- In flight: `runix` common-core extraction (`runix-core.md`).
+- **`runix` common core** (`runix-core.md`) — extracted and adopted:
+  conditions taxonomy, retryability registry, injectable runner, neutral
+  result shell. pkgstate/rsystemd/rctl all Import it and deleted their
+  duplicated copies; rctl classifies retryability via the shared registry
+  (no hardcoded class table).
 
 ## Open gaps (codex review 2026-08-07 + additions)
 
@@ -82,6 +86,9 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    record — only successful results do. The contract says audit every
    effect including failures; fix this when building the sink. Prior art:
    corteza's JSONL diagnostics, viento's fsync'd WAL.
+   **Contract written:** `durable-audit-contract.md` (two-phase
+   intent/outcome, the four separated facts, fail-closed before any
+   un-recorded effect, honest `audit_persisted`); implementation pending.
 2. **[U] General apt authorization.** rapt authorizes only r2u-allowlisted
    (`r-*`) installs; `apt_install("curl")` needs a separate security
    design (polkit / PackageKit / a broadened or second daemon path). This
@@ -111,10 +118,12 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
 ## Immediate sequence
 
 1. Merge `rsystemd` authz-audit fix (#5) and the `runix` common-core
-   contract (merged).
-2. `runix` common-core extraction (its own PR set).
+   contract (done).
+2. `runix` common-core extraction — **done**: core package plus
+   pkgstate/rsystemd/rctl adoption merged.
 3. **Durable audit** contract pass (covers gap 1, including error-path
-   audit) — foundational for trustworthy mutations.
+   audit) — **contract written** (`durable-audit-contract.md`);
+   implementation next, foundational for trustworthy mutations.
 4. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
    authorization + concurrency/locking + operation identity, behind rapt or
    a dedicated privileged path.
