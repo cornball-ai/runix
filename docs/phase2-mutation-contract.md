@@ -86,35 +86,82 @@ cross-check, not to replace, the R-level plan.
 
 ## Idempotence, per verb
 
-| Verb | Desired state | `changed = FALSE` when |
-|---|---|---|
-| `systemd_start(unit)` | active | already `active` |
-| `systemd_stop(unit)` | inactive | already `inactive`/`failed` |
-| `systemd_restart(unit)` | freshly (re)started | never idempotent — restart always acts; `changed` reflects whether it was running before |
-| `systemd_enable(unit)` | enabled | `unit_file_state` already `enabled` |
-| `systemd_disable(unit)` | disabled | already `disabled`/`masked` |
+`changed` has exactly one meaning across all verbs: **the observed
+post-state differs from the observed pre-state.** It is computed from
+`before` and `after`, not inferred from the backend exit code, so there is
+one deterministic interpretation an agent can rely on.
 
-`restart` is the honest exception: it is a deliberate bounce, so it always
-issues the effect, but its result still reports `before`/`after` so a
-caller sees the transition.
+| Verb | Desired state | `changed = TRUE` iff |
+|---|---|---|
+| `systemd_start(unit)` | active | `before$active_state != "active"` and `after$active_state == "active"` |
+| `systemd_stop(unit)` | inactive | `before$active_state` was neither `inactive` nor `failed`, and `after` is one of them |
+| `systemd_restart(unit)` | freshly (re)started | see below — never keyed on active_state alone |
+| `systemd_enable(unit)` | enabled | `before$unit_file_state != "enabled"` and `after == "enabled"` |
+| `systemd_disable(unit)` | disabled | `before$unit_file_state` was neither `disabled` nor `masked`, and `after` is one of them |
+
+Pinned edge cases (deterministic, not left to interpretation):
+
+- **`systemd_stop` on a `failed` unit**: the desired state (not-running) is
+  already met, so the verb issues `systemctl stop` anyway to clear the
+  activation (systemd treats stop of a failed unit as valid), but
+  `changed = FALSE` because `before` was `failed` and `after` is
+  `inactive`/`failed` — both in the not-running set. A `failed → inactive`
+  transition is a state cleanup, not a functional change, and is reported
+  in `before`/`after`; `changed` stays `FALSE`. Callers who care about the
+  failed→inactive cleanup read the fields, not the flag.
+- **`systemd_restart`**: always issues the effect (a restart is a
+  deliberate bounce, never idempotent). `changed` is `TRUE` iff the unit
+  is `active` afterwards AND either it was not `active` before, or its
+  `MainPID` changed (a genuine process replacement). A restart of an
+  `active` unit that yields a new `MainPID` is `changed = TRUE`; a restart
+  that fails to come back `active` is `changed` per the active_state
+  transition and surfaces the failure in `after`. `restart` of an
+  `inactive` unit starts it (`changed = TRUE`).
+- **already-desired start/enable**: `changed = FALSE`, no effect issued
+  (true idempotence — the backend is not even invoked).
 
 ## Timeout and cancellation
 
 - Every mutation verb takes `timeout` (seconds, default per verb; systemd
   unit operations default 90s to match systemd's own `TimeoutStartSec`
   neighbourhood). A backend operation exceeding it is abandoned and
-  reported as a typed `runix_timeout` error carrying `resource` and the
-  elapsed time — retryable `false` by default (the operation may have
-  partially applied; re-running is the caller's decision, informed by a
-  fresh query).
-- **A timeout never leaves a lie.** On timeout the verb still observes and
-  reports actual post-state where it can, so `after` is truthful even when
-  the wait was abandoned.
-- Cancellation: mutations run through the interruptible subprocess/D-Bus
-  path (never a blocking C call R cannot interrupt), so an interactive
-  Ctrl-C or an orchestrator's cancel signal aborts the *wait*; the same
-  "observe actual state" guarantee applies. Cancellation mid-effect is
-  reported as `runix_cancelled`, again with observed post-state.
+  reported as a typed `runix_timeout` error — retryable `false` by default
+  (the operation may have partially applied; re-running is the caller's
+  decision, informed by a fresh query).
+- **A timeout never leaves a lie — enforced by the error payload, not
+  prose.** `runix_timeout` and `runix_cancelled` both carry, in addition to
+  `resource` and `elapsed`, an **`observed`** field: the post-state read
+  the same way `after` is read (`active_state`, `sub_state`,
+  `unit_file_state`, `main_pid`). If that post-observation itself fails
+  (e.g. `systemctl show` also hangs or the tool is gone), `observed` is set
+  to `NA` and an **`observed_failed`** boolean is `TRUE` with a reason
+  string — the contract is that the caller can always distinguish "here is
+  the real state after the abandoned wait" from "state could not be
+  determined", and is never handed silence. The rctl error envelope
+  carries these fields alongside the class vector.
+
+### Cancellation, operationally
+
+Cancellation is defined by mechanism, not intent, so behaviour is
+deterministic:
+
+- The effect runs as a child process (`processx`-style, never
+  `system2(stdout=TRUE)` which blocks in C and cannot be interrupted). R
+  waits on it with a poll loop bounded by `timeout`.
+- On interrupt (interactive SIGINT) or an orchestrator cancel, R stops
+  waiting and sends the child `SIGTERM`, then `SIGKILL` after a short grace
+  (2s), and **reaps** it (`processx` `cleanup_tree = TRUE`) so no
+  grandchild survives the R call. The verb does not return until the child
+  is confirmed dead.
+- Interrupting the *wait* does not un-issue an effect systemd already
+  started: `systemctl start` hands the job to PID 1, which continues
+  independently of the client. So cancellation aborts Runix's *observation
+  of* the operation, not necessarily the operation itself — and the
+  `observed` field reports whatever state systemd actually reached. This
+  distinction is stated in the error message, never hidden.
+- After the R call returns (cancelled or timed out), nothing Runix spawned
+  is still running. The systemd job may be; that is systemd's to own and
+  the `observed` field is how the caller learns of it.
 
 ## Authorization
 
@@ -166,7 +213,11 @@ Mutation verbs surface through `rctl` as new operations
 from `rctl-json-contract.md`: the `runix_result` is the `result` payload
 on success; typed mutation errors (`runix_unauthorized`, `runix_timeout`,
 `runix_cancelled`) map to the existing class-vector error envelope with
-their documented retryability.
+their documented retryability. `runix_timeout` and `runix_cancelled`
+additionally carry `observed` (or `observed: null` with
+`observed_failed: true` and a reason) in the error object, so the
+machine-readable failure is as truthful about post-state as the success
+result is.
 
 Two additions, both backward-compatible:
 
