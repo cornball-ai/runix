@@ -129,13 +129,15 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    **Sink implemented** in the `runix` core (`file_audit_sink`,
    `memory_audit_sink`, `audit_two_phase`, `encode_json_line`): append-only
    JSONL, advisory lock with stale recovery, fsync, rotation, perms/symlink
-   guards, fallback, honest `persisted`. **Blocker before integration:** the
-   authority matrix (`durable-audit-contract.md`) — an unprivileged
-   polkit-authorized caller cannot write the root-owned system sink, so
-   system-scope needs a privileged broker or an explicitly weaker
-   caller-owned guarantee with an honest `audit_scope`. Remaining: settle that,
-   then wire the sink into the rsystemd (then apt) mutation paths so effects
-   and error paths emit records.
+   guards, fallback, honest `persisted`, plus reboot/PID-reuse-safe locking and
+   parent-dir fsync. **Authority matrix ratified (v1):** the weaker
+   caller-owned sink as an **explicit capability** — `audit_scope = "caller"`,
+   `system_durable_audit = FALSE` advertised via `rctl capabilities`, fleet
+   policy may refuse mutations lacking system-durable audit, never claimed as
+   the strong guarantee. **Autonomous fleet-wide system mutation stays
+   disabled by policy until the broker (gap 7) exists.** Remaining: wire the
+   sink into the rsystemd (then apt) mutation paths with caller-owned audit +
+   the capability, so effects and error paths emit records.
 2. **[U] General apt authorization.** rapt authorizes only r2u-allowlisted
    (`r-*`) installs; `apt_install("curl")` needs a separate security
    design (polkit / PackageKit / a broadened or second daemon path). This
@@ -174,6 +176,15 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    foundation, but this is what makes the typed data model an operable
    control plane rather than a nicer local CLI. The `approval_required`
    resume lifecycle and durable audit (gap 1) are prerequisites.
+8. **[N] Audit broker (system-durable audit for unprivileged callers).** The
+   strong resolution of the authority matrix and the gate for autonomous
+   fleet-wide system mutation: a small, single-purpose, credential-aware
+   (`SO_PEERCRED`), append-only privileged writer that appends a caller's
+   validated record to the system sink. Explicitly **not** the apt `pkexec`
+   helper (different privilege surface; a prompt would break autonomous
+   operation). Evaluate journald as a weaker existing broker first. **Contract
+   stub written:** `audit-broker-contract.md`. Its presence flips
+   `system_durable_audit` to `true`.
 
 ## Immediate sequence
 
@@ -182,10 +193,14 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
 2. `runix` common-core extraction — **done**: core package plus
    pkgstate/rsystemd/rctl adoption merged.
 3. **Durable audit** (covers gap 1, including error-path audit) — **contract
-   written and core sink implemented** (`durable-audit-contract.md`; the
-   sink, two-phase driver, and JSON encoder live in the `runix` core with
-   failure/crash-path tests). Remaining: integrate into the rsystemd (then
-   apt) mutation paths. Foundational for trustworthy mutations.
+   written, core sink implemented and hardened, authority matrix ratified**
+   (`durable-audit-contract.md`; sink, two-phase driver, JSON encoder in the
+   `runix` core with failure/crash-path tests). **Next: rsystemd integration
+   with caller-owned audit** — route the mutation verbs through
+   `audit_two_phase` (intent before the effect, outcome after), write to the
+   caller-owned sink, set `audit_scope`, advertise `system_durable_audit`, and
+   keep autonomous fleet system mutation policy-disabled until the broker
+   (gap 8). Foundational for trustworthy mutations.
 4. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
    authorization + concurrency/locking + operation identity — **contract
    written** (`apt-mutation-boundary-contract.md`), a dedicated

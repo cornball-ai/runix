@@ -149,6 +149,10 @@ retry-the-call).
     "subsystems": {
       "pkgstate": {"present": true, "version": "0.0.1.5"},
       "rsystemd": {"present": true, "version": "0.0.1.3"}
+    },
+    "audit": {
+      "system_durable_audit": false,
+      "audit_scope": "caller"
     }
   }
 }
@@ -158,6 +162,16 @@ It answers "what can this host do" from installed packages and backend
 tool presence. It never prompts, never authenticates, never mutates, and
 must succeed (exit 0) even when subsystems are absent — absence is data
 (`present: false`).
+
+**Audit capability.** The `audit` block advertises the durability an
+unprivileged caller would actually get (`durable-audit-contract.md`):
+`system_durable_audit` is `true` only when a system-durable path exists (the
+caller is root, or the audit broker is present), and `audit_scope` is the
+scope a mutation's record would be written under (`"system"` | `"caller"`).
+A fleet policy reads this to **refuse** system-scope mutations on hosts where
+`system_durable_audit` is `false`, so autonomous fleet-wide system mutation
+stays off until the broker exists. This is a capability, not a hidden
+downgrade: the weaker guarantee is visible before a mutation is attempted.
 
 ## Launcher parity
 
