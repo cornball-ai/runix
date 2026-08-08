@@ -54,15 +54,19 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 
 .nodename <- function() {
     nn <- tryCatch(Sys.info()[["nodename"]], error = function(e) NA_character_)
-    if (is.null(nn) || is.na(nn)) "unknown" else nn
+    if (is.null(nn) || is.na(nn)) {
+        "unknown"
+    } else {
+        nn
+    }
 }
 
 ## Merge the framing fields onto a domain record in deterministic key order.
 .finish_record <- function(rec, cid, phase, time) {
     c(list(schema_version = 1L, correlation_id = cid, phase = phase,
-           host = .nodename(), pid = Sys.getpid()),
-      rec,
-      list(time = time))
+            host = .nodename(), pid = Sys.getpid()),
+        rec,
+        list(time = time))
 }
 
 #' Run a mutation under the two-phase durable-audit discipline
@@ -117,7 +121,7 @@ audit_two_phase <- function(sink, intent, effect, outcome,
     if (!isTRUE(ir$persisted) && identical(on_intent_failure, "fail_closed")) {
         runix_abort(
                     paste0("intent audit not durable; refusing to issue effect (",
-                           if (is.null(ir$error)) "unknown" else ir$error, ")"),
+                if (is.null(ir$error)) "unknown" else ir$error, ")"),
                     subclass = "runix_audit_error",
                     data = list(correlation_id = cid, phase = "intent"))
     }
@@ -125,13 +129,13 @@ audit_two_phase <- function(sink, intent, effect, outcome,
     result <- tryCatch(
                        effect(cid),
                        error = function(e) {
-                           err_rec <- .finish_record(
-                                                     list(outcome = "error", effect_issued = NA,
-                                                          error = conditionMessage(e)),
-                                                     cid, "outcome", clock())
-                           sink$write(err_rec)
-                           stop(e)
-                       })
+        err_rec <- .finish_record(
+                                  list(outcome = "error", effect_issued = NA,
+                                       error = conditionMessage(e)),
+                                  cid, "outcome", clock())
+        sink$write(err_rec)
+        stop(e)
+    })
 
     outcome_rec <- .finish_record(outcome(result), cid, "outcome", clock())
     orr <- sink$write(outcome_rec)

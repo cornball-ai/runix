@@ -36,14 +36,10 @@
 #' s <- file_audit_sink(tempfile(fileext = ".jsonl"), durability = "none")
 #' s$write(list(operation = "demo", outcome = "ok"))$persisted
 #' @export
-file_audit_sink <- function(path,
-                            durability = c("fsync", "flush", "none"),
-                            max_bytes = 10 * 1024^2,
-                            keep = 5L,
-                            dir_mode = "0750",
-                            file_mode = "0640",
-                            lock_timeout = 10,
-                            lock_stale = 60,
+file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
+                            max_bytes = 10 * 1024 ^ 2, keep = 5L,
+                            dir_mode = "0750", file_mode = "0640",
+                            lock_timeout = 10, lock_stale = 60,
                             encoder = encode_json_line,
                             syncer = .default_syncer,
                             fallback = .default_fallback) {
@@ -56,8 +52,8 @@ file_audit_sink <- function(path,
     write <- function(record) {
         line <- tryCatch(encoder(record), error = function(e) e)
         if (inherits(line, "condition")) {
-            fallback(record, reason = paste0("encode failed: ",
-                                             conditionMessage(line)))
+            fallback(record,
+                     reason = paste0("encode failed: ", conditionMessage(line)))
             return(list(persisted = FALSE, durability = durability,
                         error = "encode_failed"))
         }
@@ -261,8 +257,8 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
 ## Errors on failure so the caller can report persisted = FALSE honestly.
 .default_syncer <- function(path) {
     status <- suppressWarnings(
-                               system2("sync", c("--data", shQuote(path)),
-                                       stdout = FALSE, stderr = FALSE))
+                               system2("sync", c("--data", shQuote(path)), stdout = FALSE,
+                                       stderr = FALSE))
     if (!identical(as.integer(status), 0L)) {
         stop("fsync via 'sync' failed for ", path, " (status ", status, ")")
     }
