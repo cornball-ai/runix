@@ -55,7 +55,8 @@ encode_json_line <- function(x, max_depth = 64L) {
     if (!is.null(names(x))) {
         return(.json_container(as.list(x), depth, max_depth))
     }
-    parts <- vapply(seq_len(n), function(i) .json_scalar(x[i], depth, max_depth),
+    parts <- vapply(seq_len(n),
+                    function(i) .json_scalar(x[i], depth, max_depth),
                     character(1))
     paste0("[", paste(parts, collapse = ","), "]")
 }

@@ -186,8 +186,8 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
             next
         }
         if (waited >= timeout) {
-            runix_abort(paste0("could not acquire audit lock within ", timeout,
-                               "s: ", lockdir),
+            runix_abort(paste0("could not acquire audit lock within ",
+                               timeout, "s: ", lockdir),
                         subclass = c("runix_audit_locked", "runix_audit_error"),
                         data = list(resource = path))
         }
@@ -216,7 +216,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
         cur_boot <- .boot_id()
         if (!is.na(cur_boot) && !is.na(owner$boot) &&
             !identical(cur_boot, owner$boot)) {
-            return(TRUE)  # machine rebooted since the lock was taken
+            return(TRUE) # machine rebooted since the lock was taken
         }
         alive <- .pid_alive(owner$pid)
         if (identical(alive, FALSE)) {
@@ -226,9 +226,9 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
             st <- .proc_starttime(owner$pid)
             if (!is.na(st) && !is.na(owner$starttime) &&
                 !identical(st, owner$starttime)) {
-                return(TRUE)  # PID reused; the original owner is gone
+                return(TRUE) # PID reused; the original owner is gone
             }
-            return(FALSE)  # genuinely held by a live owner
+            return(FALSE) # genuinely held by a live owner
         }
         ## alive unknown (no /proc) -> fall through to the age test
     }
@@ -267,12 +267,16 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
             if (length(toks) >= 3L) {
                 return(list(
                             pid = suppressWarnings(as.integer(toks[1L])),
-                            boot = if (identical(toks[2L], "-")) NA_character_ else toks[2L],
+                            boot = if (identical(toks[2L], "-")) {
+                            NA_character_
+                        } else {
+                            toks[2L]
+                        },
                             starttime = if (identical(toks[3L], "-")) {
-                                NA_character_
-                            } else {
-                                toks[3L]
-                            }))
+                            NA_character_
+                        } else {
+                            toks[3L]
+                        }))
             }
         }
     }
@@ -286,7 +290,11 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
 }
 
 .dash <- function(x) {
-    if (length(x) == 0L || is.na(x)) "-" else as.character(x)
+    if (length(x) == 0L || is.na(x)) {
+        "-"
+    } else {
+        as.character(x)
+    }
 }
 
 ## Boot id: stable per boot, changes on reboot. Linux only.
@@ -316,7 +324,11 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
     }
     after <- sub("^.*\\) ", "", line)
     toks <- strsplit(after, " ", fixed = TRUE)[[1L]]
-    if (length(toks) >= 20L) toks[20L] else NA_character_
+    if (length(toks) >= 20L) {
+        toks[20L]
+    } else {
+        NA_character_
+    }
 }
 
 ## --- rotation: rename-then-create, never truncate-in-place ------------------
@@ -370,8 +382,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
 ## or renamed entry is durable. Errors on failure.
 .default_dir_syncer <- function(dir) {
     status <- suppressWarnings(
-                               system2("sync", shQuote(dir), stdout = FALSE,
-                                       stderr = FALSE))
+                               system2("sync", shQuote(dir), stdout = FALSE, stderr = FALSE))
     if (!identical(as.integer(status), 0L)) {
         stop("directory fsync via 'sync' failed for ", dir, " (status ",
              status, ")")
