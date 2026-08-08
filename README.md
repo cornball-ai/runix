@@ -7,9 +7,13 @@ interfaces Ubuntu already uses (apt, systemd, D-Bus, udev, polkit), plus an
 **Status: experimental, pre-0.1 everywhere.** APIs change without
 deprecation until the packages reach 0.1.0.
 
-This is the umbrella repository: architecture and documentation, no package
-code.
+This repository is both the **`runix` common-core package** (zero-dependency
+shared spine: typed conditions, retryability registry, injectable-runner
+machinery, neutral result object) and the project umbrella (architecture
+docs, integration tests, deployment). The package builds from the repo root;
+`docs/`, `integration-tests/`, and `deploy/` are `.Rbuildignore`d.
 
+- [docs/roadmap.md](docs/roadmap.md) — mission, built-so-far, prioritized gaps
 - [PLAN.md](PLAN.md) — the full design: goals, phases, privilege model,
   language boundaries
 - [docs/ubuntu-python-admin-inventory.md](docs/ubuntu-python-admin-inventory.md)
@@ -22,9 +26,11 @@ code.
 
 | Package | Scope | Status |
 |---|---|---|
+| runix (this repo) | zero-dep common core: conditions, retryability, runner, result | experimental |
 | [pkgstate](https://github.com/cornball-ai/pkgstate) | dpkg/apt read-only introspection | experimental |
-| [rsystemd](https://github.com/cornball-ai/rsystemd) | systemd read-only introspection | experimental |
-| [rapt](https://github.com/cornball-ai/rapt) | apt mutations (Python-free bspm replacement) | shipping |
+| [rsystemd](https://github.com/cornball-ai/rsystemd) | systemd introspection + managed mutation | experimental |
+| [rctl](https://github.com/cornball-ai/rctl) | machine-drivable CLI over the subsystems | experimental |
+| [rapt](https://github.com/cornball-ai/rapt) | r2u binary R-package install backend (bspm alternative) | shipping |
 
 ## License
 

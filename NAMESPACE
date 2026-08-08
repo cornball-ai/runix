@@ -1,0 +1,9 @@
+# tinyrox says don't edit this manually, but it can't stop you!
+
+export(is_retryable)
+export(new_runix_result)
+export(new_runner)
+export(register_retryable)
+export(runix_abort)
+
+S3method(print,runix_result)
