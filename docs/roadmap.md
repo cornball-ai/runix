@@ -190,7 +190,16 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    (submission is not durable persistence; `SyncIntervalSec`, retention, and
    rate limiting weaken the `audit_persisted` invariant), so it cannot back
    `system_durable_audit = TRUE`. The strong broker's presence flips
-   `system_durable_audit` to `true`; implementation is the next build unit.
+   `system_durable_audit` to `true`. **Wire protocol pinned** (versioned
+   length-prefixed frames with a hard max, audited C JSON parser,
+   `open_intent`/`write_outcome` only, `SO_PEERCRED` over payload, opaque
+   non-authorizing receipt binding, typed errors, disconnect never erases a
+   durable intent) plus broker I/O (`O_APPEND`/`O_NOFOLLOW`, advisory lock,
+   complete-write loops, `fdatasync`, parent-dir fsync) and sandboxed systemd
+   socket/service units. **Build sequence:** (2) C broker, (3) R AF_UNIX
+   client adapter (a broker-backed sink), (4) protocol/abuse tests, (5)
+   rsystemd re-integration + live unprivileged gate before advertising the
+   strong capability. The receipt-based sink interface (step 1) is done.
 
 ## Immediate sequence
 
