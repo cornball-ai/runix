@@ -347,3 +347,36 @@ a unit-file change requires; masking/unmasking (a later slice); any
 declarative multi-resource apply (that is Phase 7); network mutations
 (rnetwork, later). One resource per call; batching is a caller/harness
 concern built on these primitives, not a new privileged path.
+
+## Conformance tests (required)
+
+The implementation must carry these scenarios as fixture tests (injectable
+runner, no live mutation needed — each is scripted `systemctl show`/exit
+output), because each pins a hazard the design exists to prevent:
+
+1. **restart of an already-active service with stale `active`**: `before`
+   and `after` both `active`; the fake advances `InvocationID` only after
+   the (simulated) job runs. The verb must not report success off the
+   stale read — `changed` is true only once the invocation id differs.
+2. **oneshot restart with `MainPID = 0`**: postcondition is `active`/
+   `exited` with no PID compare; correlation via `InvocationID`. Absence of
+   a PID is data, not failure.
+3. **invocation marker never advances**: the fake keeps `InvocationID`
+   constant through `timeout`. The verb reports `outcome = "submitted"`,
+   `changed = NA`, `state_changed = NA` — never fabricated success.
+4. **job failure after submission**: unit goes `failed` after the effect;
+   `runix_operation_failed`, with the failed `after` state on the error.
+5. **cancellation during polling**: interrupt mid-poll; `runix_cancelled`
+   carrying a truthful `observed`.
+6. **timeout with truthful `observed`**: wait exceeds `timeout`;
+   `runix_timeout` carrying `observed` (and `observed_failed = TRUE` with a
+   reason if the post-read itself fails).
+
+Implementation invariants these tests enforce:
+
+- capture the `before` invocation marker **immediately before** enqueueing
+  the effect (a marker read too early widens the stale-state window);
+- poll on **monotonic** timestamps (`StateChangeTimestampMonotonic`), never
+  wall-clock, so clock adjustments cannot corrupt the wait;
+- carry `completion_method` and `job_result` in **both** the result and the
+  audit record.
