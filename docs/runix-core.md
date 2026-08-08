@@ -44,18 +44,35 @@ Hard rules:
    hardcoding the string. This kills the cross-repo coupling that required a
    hand-edit during the rename — the class and its retryability are declared
    in one place, and rctl asks `runix::is_retryable()`.
-3. **The injectable-runner contract.** The normalized `run_system` (LC_ALL=C,
-   optional TZ=UTC, stderr capture, missing-tool → typed error) plus the
-   `set_runner`/`runner` injection machinery. The two drifted copies
-   (rsystemd captures stderr + has the sleeper; pkgstate does not) converge
-   on one implementation. Runner *state* stays per-package (each package
-   injects its own fake) — `runix` provides the machinery and a state-env
-   factory, not one global runner.
+3. **The injectable-runner contract.** `run_system` provides the injection
+   machinery, stderr capture, and missing-tool → typed error, plus the
+   `set_runner`/`runner` machinery. It bakes in **no subsystem defaults** —
+   no `LC_ALL`, no `TZ`, no command semantics. The environment is a
+   parameter each subsystem supplies (pkgstate: `LC_ALL=C`; rsystemd:
+   `LC_ALL=C` + `TZ=UTC`), so the core stays subsystem-neutral while the two
+   drifted copies converge on one env-agnostic implementation. Runner
+   *state* stays per-package (each package injects its own fake) — `runix`
+   provides the machinery and a state-env factory, not one global runner.
 4. **`runix_result` structure + helpers.** The generic result object
    (`operation`/`resource`/`changed`/`state_changed`/`preview`/`before`/
    `after`/`planned`/`completion`/`audit`) and its constructor/print. Domain
    results subclass it — rsystemd's `systemd_result` becomes
    `c("systemd_result", "runix_result")` built via the runix constructor.
+
+## Extraction constraints (codex review, 2026-08-07)
+
+Binding for the extraction pass:
+
+1. `runix` core stays base-R and zero external dependency.
+2. **No subsystem-specific environment defaults** (`LC_ALL`, `TZ`) or
+   command semantics (systemctl/apt/dpkg) in the shared runner — env is a
+   caller parameter (see item 3 above).
+3. Retryability is **queried through the shared helper** (`is_retryable`),
+   never reconstructed from class-name strings in rctl.
+4. `runix_result` stays **subsystem-neutral** — no systemd/apt fields in
+   the core structure; domain packages subclass and fill specifics.
+5. Compatibility tests cover the existing private runner hooks
+   (`pkg:::set_runner`) **before** any local copy is deleted.
 
 ## What stays out of `runix`
 
