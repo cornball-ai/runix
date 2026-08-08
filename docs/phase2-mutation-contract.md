@@ -3,8 +3,9 @@
 Drafted 2026-08-07, before any Phase 2 implementation. Phase 1 made Runix
 excellent at *reading* a system; Phase 2 lets it *change* one, under a
 discipline strict enough that an AI agent or orchestration harness can be
-trusted to drive it. systemd mutations land first; apt mutations follow,
-behind rapt's privileged daemon.
+trusted to drive it. systemd mutations land first; apt mutations follow, in a
+separate sibling package under the apt mutation boundary
+(`apt-mutation-boundary-contract.md`), not rapt.
 
 This contract extends, and never contradicts, two existing documents:
 `phase1-introspection-contracts.md` (functional core → imperative
@@ -31,7 +32,9 @@ encoding). Read both first.
 6. **Reuse service-level authorization where provided.** systemd, logind,
    and NetworkManager run their own polkit checks over D-Bus; Runix
    inherits them and reports authorization failures as typed errors. It
-   does not reimplement policy. apt, having no such layer, goes through
+   does not reimplement policy. apt, having no such inherited layer, is
+   gated by the apt mutation boundary (`apt-mutation-boundary-contract.md`):
+   a pkexec/polkit human gate plus a machine-mode approval boundary, not
    rapt's daemon.
 7. **Arbitrary R evaluation is never a privilege mechanism** (carried from
    the agent-facing design). No mutation path evaluates caller-supplied
@@ -247,9 +250,11 @@ structured out rather than dependency-managed).
 - **After the R call returns, nothing Runix spawned is still running** — by
   construction, since each `systemctl` invocation is short-lived. The
   systemd job is systemd's to own.
-- The apt slice (behind rapt, later) has its own long-running-transaction
-  shape; its cancellation model is rapt's daemon's concern and gets its own
-  contract entry. This section governs the systemd slice only.
+- The apt slice (a separate sibling package, later) has its own
+  long-running-transaction shape; its cancellation model is that package's
+  concern under the apt mutation boundary
+  (`apt-mutation-boundary-contract.md`), not rapt's. This section governs the
+  systemd slice only.
 
 ## Authorization
 
@@ -266,9 +271,12 @@ structured out rather than dependency-managed).
 - Preview under insufficient authorization reports `planned` plus an
   `authorized = FALSE` marker in the result, so a dry-run never implies an
   effect the caller cannot actually cause.
-- apt mutations carry no service-level authz; they go through rapt's
-  daemon, whose existing allowlist model is the boundary. Runix does not
-  add a second privileged path.
+- apt mutations have no inherited service-level authz to reuse; they are
+  gated by the apt mutation boundary (`apt-mutation-boundary-contract.md`) --
+  a pkexec/polkit human gate plus a machine-mode approval boundary -- in a
+  separate sibling package. rapt (the r2u `r-*` backend) is not that
+  authorizer and is left untouched; the boundary is that package's own
+  privileged path, distinct from rapt's allowlist daemon.
 
 ## Audit record
 
@@ -338,9 +346,12 @@ In scope for the first Phase 2 slice (rsystemd):
 `systemd_disable`, each with preview, idempotence, timeout/cancellation,
 service-level authz, audit, and the `runix_result` return.
 
-Deferred to the apt slice (behind rapt): `apt_install`, `apt_remove`,
-`apt_update` — same result/audit/preview shape, authorized by rapt's
-daemon rather than polkit.
+Deferred to the apt slice: `apt_install`, `apt_remove`, `apt_update`,
+`apt_upgrade` — same result/audit/preview shape, in a **separate sibling
+package** under the apt mutation boundary (`apt-mutation-boundary-contract.md`).
+rapt (the r2u `r-*` install backend) is **not** the general-apt authorizer
+and is left untouched; authorization is the pkexec/polkit human gate plus the
+machine-mode approval boundary, not rapt's daemon.
 
 Explicit non-goals for Phase 2: `daemon-reload` orchestration beyond what
 a unit-file change requires; masking/unmasking (a later slice); any
