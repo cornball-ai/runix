@@ -28,16 +28,26 @@ and `durable-audit-contract.md` (how every attempt is recorded).
   identity, audit); the CLI bridge is the initial backend under the usual
   discipline (`LC_ALL=C`, verify postconditions, injectable runner).
 
-## Effect classes for apt operations
+## Risk and authorization metadata per operation
 
-Applying the roadmap's effect-class policy to apt:
+Applying the roadmap's authorization-and-risk policy to apt: each operation
+carries explicit metadata, and the **fleet policy** reads it to decide
+go/no-go, rather than a fixed "install vs update" verb category (an upgrade
+can be as disruptive as an install). `preview_available` is `TRUE` for all of
+these via apt's simulate. `approval_required` below is the **default**; the
+fleet policy may raise or lower it per operation and per host role.
 
-| Operation | Class | Rationale |
-|---|---|---|
-| `apt.install`, `apt.remove`, `apt.purge` | human-gated | changes the trusted software set; hard to reverse |
-| `apt.add_repo`, `apt.import_key` | human-gated | changes what the system will trust in future |
-| `apt.upgrade`, `apt.dist_upgrade` | human-gated (default) | can pull large, cross-cutting changes |
-| `apt.update` (list refresh) | agent-autonomous | no package-state change; only the lists lock |
+| Operation | reversible | disruptive | requires_authorization | approval_required (default) |
+|---|---|---|---|---|
+| `apt.install` | partial (remove undoes it) | maybe (config, deps) | yes | yes |
+| `apt.remove`, `apt.purge` | maybe (reinstall; purge drops config) | yes | yes | yes |
+| `apt.add_repo`, `apt.import_key` | yes | no | yes | yes |
+| `apt.upgrade`, `apt.dist_upgrade` | hard | yes | yes | yes |
+| `apt.update` (list refresh) | n/a (no package change) | no | no | no |
+
+`apt.update` is the only one an agent runs autonomously by default (no
+package-state change, only the lists lock). Everything else defaults to
+`approval_required` and flows through the approval boundary below.
 
 Autonomous security upgrades are a legitimate want (roadmap: agents doing the
 boring things), but they already have a first-party home in
@@ -77,6 +87,28 @@ operations the operator wants gated, with no new resident daemon.
 The authorization *descriptor* recorded in the audit (`authorized_via`)
 names the polkit action actually checked, exactly as the systemd path
 records its `org.freedesktop.systemd1.*` action.
+
+### Interactive vs machine mode: the approval boundary
+
+Option 2's `pkexec` password prompt is the gate for a **human at a terminal**.
+It must never be reached by an agent: a `--json` invocation cannot block on an
+interactive password. Autonomous operation and a password gate are compatible
+only through an explicit, asynchronous approval boundary.
+
+- **Interactive (human, TTY):** `pkexec` prompts, the human authenticates,
+  the effect proceeds inline.
+- **Machine mode (`rctl --json`):** a gated operation returns
+  `approval_required`, carrying the operation identity (the audit
+  `correlation_id`) and the computed preview, and stops. It issues no effect.
+  A human or fleet controller authorizes out of band, and the operation is
+  **resumed by identity**.
+
+The durable **intent** record (written before the boundary, per
+`durable-audit-contract.md`) is what makes resume-by-id sound: the attempt is
+on disk before it can proceed, so an approval references a real recorded
+operation and a resume cannot fabricate one. `approval_required` is a
+first-class terminal outcome, distinct from `unauthorized` (an actual denial)
+and from `ok`, and is surfaced in the envelope (see `rctl-json-contract.md`).
 
 ## Global lock and concurrency
 

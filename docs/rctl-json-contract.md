@@ -77,11 +77,26 @@ subsystem packages already raise:
 | 1 | operation failed or refused | `ok: false`, error envelope |
 | 2 | usage error (bad arguments/flags) | `ok: false`, error envelope |
 | 3 | environment failure (missing subsystem or backend tool) | `ok: false`, error envelope |
+| 4 | approval required (well-formed, gated, awaiting out-of-band authorization) | `ok: false`, error envelope, class `runix_approval_required` |
 
 Mapping from condition classes: validation errors → 2; `*_missing_tool`
-and absent-subsystem conditions → 3; everything else → 1. The error
-envelope is emitted on stdout even for exit codes 2 and 3 (machine mode
-never leaves stdout empty).
+and absent-subsystem conditions → 3; `runix_approval_required` → 4;
+everything else → 1. The error envelope is emitted on stdout even for exit
+codes 2, 3, and 4 (machine mode never leaves stdout empty).
+
+**Approval-gated mutations (forward-looking).** A human-gated mutation in
+machine mode never blocks on an interactive password (see
+`apt-mutation-boundary-contract.md`). It returns exit code 4 with an
+error-shaped envelope whose class is `runix_approval_required`, carrying the
+operation identity (`correlation_id`) and the computed preview, and issues no
+effect. This is neither a failure nor a denial: `runix_unauthorized` (exit 1)
+is an actual polkit denial, while `runix_approval_required` (exit 4) is a
+well-formed request pending sign-off, resumable by identity. It rides the
+existing error-envelope shape, so a consumer that does not recognize the
+class degrades gracefully; whether it later earns a dedicated top-level
+discriminator is an implementation call to settle when the mutation envelope
+lands. `retryable` is `false` (the resolution is approve-and-resume, not
+retry-the-call).
 
 ## Deterministic encoding
 

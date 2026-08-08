@@ -88,6 +88,16 @@ write a single record and skip the outcome phase.
 Paths that issue no effect and can persist their single record do not need
 the two-phase split, but they use the same `correlation_id` and schema.
 
+**Approval boundary interaction.** For a machine-mode gated operation
+(`apt-mutation-boundary-contract.md`), the intent record is written and made
+durable, then the call returns `approval_required` carrying that
+`correlation_id` and issues no effect. This is exactly why intent-first
+matters: a later out-of-band authorization references a real, recorded
+operation, and the authorized resume attaches its outcome record to the same
+`correlation_id`. An approved-and-resumed operation is one intent plus one
+outcome, as usual; a never-approved one is an intent that stays open, which is
+an honest, queryable state rather than a silent effect.
+
 ## Record schema (persisted line)
 
 Append-only JSONL: one JSON object per line, deterministic key order,
