@@ -125,7 +125,12 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    cornball tooling.
    **Contract written:** `durable-audit-contract.md` (two-phase
    intent/outcome, the four separated facts, fail-closed before any
-   un-recorded effect, honest `audit_persisted`); implementation pending.
+   un-recorded effect, honest `audit_persisted`).
+   **Sink implemented** in the `runix` core (`file_audit_sink`,
+   `memory_audit_sink`, `audit_two_phase`, `encode_json_line`): append-only
+   JSONL, advisory lock with stale recovery, fsync, rotation, perms/symlink
+   guards, fallback, honest `persisted`. Remaining: wire it into the rsystemd
+   (then apt) mutation paths so effects and error paths emit records.
 2. **[U] General apt authorization.** rapt authorizes only r2u-allowlisted
    (`r-*`) installs; `apt_install("curl")` needs a separate security
    design (polkit / PackageKit / a broadened or second daemon path). This
@@ -171,9 +176,11 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    contract (done).
 2. `runix` common-core extraction — **done**: core package plus
    pkgstate/rsystemd/rctl adoption merged.
-3. **Durable audit** contract pass (covers gap 1, including error-path
-   audit) — **contract written** (`durable-audit-contract.md`);
-   implementation next, foundational for trustworthy mutations.
+3. **Durable audit** (covers gap 1, including error-path audit) — **contract
+   written and core sink implemented** (`durable-audit-contract.md`; the
+   sink, two-phase driver, and JSON encoder live in the `runix` core with
+   failure/crash-path tests). Remaining: integrate into the rsystemd (then
+   apt) mutation paths. Foundational for trustworthy mutations.
 4. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
    authorization + concurrency/locking + operation identity — **contract
    written** (`apt-mutation-boundary-contract.md`), a dedicated
