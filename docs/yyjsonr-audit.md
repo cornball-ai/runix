@@ -19,6 +19,36 @@ maintainer investigation.
   upstream MIT headers (© 2020 YaoYuan), credited in `Authors@R` (aut,
   cph), `DESCRIPTION` Copyright, `inst/COPYRIGHTS`, and
   `inst/LICENSE-yyjson.txt`.
+- **Bundled-vs-upstream diff**: `src/yyjson.c` and `src/yyjson.h` in the
+  CRAN tarball are **byte-identical** to the upstream
+  `ibireme/yyjson` 0.12.0 release (`yyjson.c` sha256
+  `ac2e9bbb2e2d9149d90878d40506a1d624fa0b33c979a11b61075c54782c6d6a` on
+  both sides). Nothing was inserted between upstream and CRAN.
+
+## Supply-chain posture
+
+This audit deliberately stops at artifact provenance, source integrity,
+licensing, CVEs, C review, and adversarial tests. Maintainer biography
+(nationality, employer) is not part of the assessment, for a security
+reason rather than a courtesy one: identity is the weakest link in the
+chain to verify — the xz/Jia Tan incident was executed under a fabricated
+persona that biographical vetting would have passed — while artifacts can
+be verified regardless of who produced them. The controls that actually
+bind a hostile- or coerced-maintainer scenario here are:
+
+1. exact-version pin (`>= 0.1.22` audited; upgrades are deliberate);
+2. this review was performed on the same bytes we run (mirror-cross-checked
+   tarball, sha256 recorded);
+3. the bundled C library is diffed against its upstream release, so the
+   R-packaging layer cannot silently carry a modified yyjson;
+4. no automatic upgrades — every version change re-runs the provenance
+   checks and re-checks the bundled yyjson version and diff;
+5. escape hatch: yyjson is a two-file MIT library — if trust in the
+   packaging chain ever degrades, the audited copy can be vendored into a
+   cornball-controlled package without API change;
+6. binary channel note: r2u binaries are built by the r2u infrastructure
+   from CRAN sources — installing them shifts trust to that build chain.
+   Where that is unacceptable, build from the audited source tarball.
 
 ## C-glue findings (write path)
 
