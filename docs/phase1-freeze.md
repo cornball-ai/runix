@@ -5,7 +5,7 @@ Every repository carries the annotated tag `phase1` at these commits:
 | Repo | Commit | Package version |
 |---|---|---|
 | runix | d9be982 (`fecf16f` + tag) | — (umbrella, docs only) |
-| rdpkg | 03f0952 (`d8a7c30`) | 0.0.1.6 |
+| rdpkg (renamed to pkgstate post-freeze, 2026-08-07) | 03f0952 (`d8a7c30`) | 0.0.1.6 |
 | rsystemd | 0251bad (`7da3f90`) | 0.0.1.3 |
 | rctl | 6e195b9 (`aa22a01`) | 0.0.1 |
 

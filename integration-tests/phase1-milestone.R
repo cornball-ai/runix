@@ -1,6 +1,6 @@
 #!/usr/bin/env r
 ## Phase 1 cross-package acceptance: PLAN.md's first concrete milestone,
-## exercised across rdpkg and rsystemd together. Lives in the umbrella repo
+## exercised across pkgstate and rsystemd together. Lives in the umbrella repo
 ## because subsystem packages must not depend on each other.
 ##
 ##     r integration-tests/phase1-milestone.R
@@ -8,7 +8,7 @@
 ## Live-system checks; exits non-zero on any failure.
 
 stopifnot(
-    requireNamespace("rdpkg", quietly = TRUE),
+    requireNamespace("pkgstate", quietly = TRUE),
     requireNamespace("rsystemd", quietly = TRUE)
 )
 
@@ -23,19 +23,19 @@ check <- function(label, expr) {
 
 results <- c(
     check("apt_upgradable() returns the contracted frame", {
-        up <- rdpkg::apt_upgradable()
+        up <- pkgstate::apt_upgradable()
         identical(names(up), c("package", "installed", "candidate",
             "origin", "site", "suite", "component", "security",
             "phased_percent"))
     }),
     check("dpkg_installed() sees dpkg itself",
-        "dpkg" %in% rdpkg::dpkg_installed()$package),
+        "dpkg" %in% pkgstate::dpkg_installed()$package),
     check("apt_policy('dpkg') explains resolution", {
-        p <- rdpkg::apt_policy("dpkg")
+        p <- pkgstate::apt_policy("dpkg")
         p$installed == p$candidate && nrow(p$versions) >= 1L
     }),
     check("apt_cache_timestamps() has real stamps", {
-        ts <- rdpkg::apt_cache_timestamps()
+        ts <- pkgstate::apt_cache_timestamps()
         !is.na(ts$lists_updated) && !is.na(ts$status_changed)
     }),
     check("systemd_units() sees the root mount",
@@ -54,7 +54,7 @@ results <- c(
             (st$state != "running" || length(st$failed_units) == 0L)
     }),
     check("cross-package: installed unattended-upgrades has its unit", {
-        have <- "unattended-upgrades" %in% rdpkg::dpkg_installed()$package
+        have <- "unattended-upgrades" %in% pkgstate::dpkg_installed()$package
         if (have) {
             info <- rsystemd::systemd_unit_info("unattended-upgrades.service")
             info$load_state == "loaded"

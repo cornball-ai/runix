@@ -52,7 +52,7 @@ build_one() {
     echo "built ${deb}_${ver}_all.deb"
 }
 
-build_one /home/troy/rdpkg r-cornball-rdpkg \
+build_one /home/troy/pkgstate r-cornball-pkgstate \
     "r-base-core" "" \
     "read-only dpkg/apt introspection for R"
 build_one /home/troy/rsystemd r-cornball-rsystemd \
@@ -60,7 +60,7 @@ build_one /home/troy/rsystemd r-cornball-rsystemd \
     "read-only systemd introspection for R"
 build_one /home/troy/rctl r-cornball-rctl \
     "r-base-core, r-cran-yyjsonr (>= 0.1.22), littler" \
-    "r-cornball-rdpkg, r-cornball-rsystemd" \
+    "r-cornball-pkgstate, r-cornball-rsystemd" \
     "Runix command-line interface"
 
 (cd "$dist" && dpkg-scanpackages --multiversion . > Packages 2>/dev/null \
