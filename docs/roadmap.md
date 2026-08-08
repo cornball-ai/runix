@@ -34,30 +34,62 @@ shape of the data.
 This payoff is conditional. For one machine with a human at the keyboard,
 the native tools are fine and Runix is ceremony. The value shows up at fleet
 scale, under agent operation, and where auditability matters — the intended
-workload, not a single desktop.
+workload, not a single desktop. Usefulness is a claim to validate against
+concrete fleet workflows (see "Validation"), not to assume from the
+abstraction: an agent already drives `systemctl` and `apt` well, so Runix
+earns its place only where it makes a real workflow materially safer.
+
+A second, honest value is blast-radius control. Cutting-edge Python work can
+wreck a host on a fat-fingered command or a forgotten venv, and an agent
+running arbitrary shell or Python has the whole machine in scope. The safety
+does **not** come from R: a badly designed mutation API in R is just as
+destructive. It comes from the boundary every mutation passes through:
+
+    typed operation -> preview -> explicit authorization
+    -> durable intent audit -> narrowly-scoped effect
+    -> observed post-state -> outcome audit
+
+Shipping that boundary as stable `.deb` packages, rather than assembling it
+in a user's virtualenv, is part of the safety story. Runix must never claim R
+is inherently safe; the boundary is what is safe.
 
 r2u/rapt is the install *transport* that carries these packages to the fleet
 (fast, Python-free), not the foundation. The foundation is the
 typed-API-over-native-interfaces spine (the `runix` common core).
 
-## Authorization policy: effect class
+## Authorization and risk policy
 
-Authorization is drawn by **effect class**, not by tool or verb:
+Authorization is **not** a binary "human vs autonomous" split by tool. That
+split is wrong: an update can be as disruptive as an install (a restart
+causes an outage, a security upgrade pulls cross-cutting changes). Instead
+each operation carries explicit **risk and authorization metadata**, and a
+separate **fleet policy** reads it to decide whether a given agent may
+proceed:
 
-- **Human-gated** — hard-to-reverse, trust-boundary-crossing operations
-  (package install/remove, repository add, key import). These require an
-  explicit human gate (sudo + password / polkit prompt). An agent proposes;
-  a human authorizes.
-- **Agent-autonomous** — routine operations inside an already-trusted set
-  (service restart/enable, unattended security updates, cache refresh).
-  These run without a prompt but stay previewable and audited.
+- `reversible` — can this be cleanly undone?
+- `disruptive` — can it cause an outage (restart, removal)?
+- `requires_authorization` — does it cross a privilege/trust boundary?
+- `preview_available` — can the effect be simulated first?
+- `approval_required` — must a human or controller sign off before it runs?
 
-Runix's job is to **surface which class an operation is in** so the caller
-(agent or human) knows when to stop and ask, via the planned-effect and
-authorization fields already on `runix_result`. polkit enforces the
-privileged gate at the D-Bus boundary; Runix makes the class legible above
-it. Gap 2 (apt mutation boundary) is where this policy becomes a concrete
-contract for the install/remove path.
+polkit enforces *authorization* at the privileged boundary; it does not
+decide *operational risk*. The go/no-go decision belongs to the fleet policy
+reading this metadata, not to a hardcoded verb category. Runix's job is to
+make the metadata legible on the result and the envelope; the policy engine
+is a downstream consumer, not part of the subsystem packages.
+
+**The approval boundary (machine mode never blocks on a password).** An
+autonomous agent and a sudo/password gate are compatible only through an
+explicit, asynchronous approval boundary. In machine mode (`rctl --json`) a
+gated operation must never wait on an interactive prompt: it returns
+`approval_required` carrying the operation identity (the audit
+`correlation_id`) and its preview, and stops. A human or fleet controller
+authorizes out of band, and the operation is resumed by identity. The
+interactive `pkexec`/polkit password prompt is for a human at a terminal,
+never for an agent in `--json` mode. The durable **intent** record (written
+before anything is issued) is what makes "approve later, resume by id"
+sound: the attempt is on disk before it can proceed. Gap 2 (apt mutation
+boundary) is where this becomes a concrete contract for the install path.
 
 ## Built so far
 
@@ -120,6 +152,14 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
 6. **[L] Per-target replacement strategy.** For each Phase 4 Python target:
    coexistence, integration/compat tests against the original, `.deb`
    packaging, and deprecation path — not just a rewritten implementation.
+7. **[N] Fleet control-plane primitives.** `rctl --json` is the data model;
+   turning it into a fleet control plane needs more: stable host identity,
+   schema negotiation and version reporting, capability reporting, durable
+   operation IDs (the audit `correlation_id`, reused), a remote transport,
+   and drift/state comparison across hosts. Downstream of the current
+   foundation, but this is what makes the typed data model an operable
+   control plane rather than a nicer local CLI. The `approval_required`
+   resume lifecycle and durable audit (gap 1) are prerequisites.
 
 ## Immediate sequence
 
@@ -135,6 +175,30 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    written** (`apt-mutation-boundary-contract.md`), a dedicated
    pkexec/polkit-gated helper, rapt left as-is.
 5. apt mutation implementation; then gaps 4–6 incrementally.
+
+## Validation: the workflow that must be materially better
+
+Usefulness is conditional and gets validated against a concrete fleet
+workflow, not assumed from the abstraction. The acceptance test: is this
+workflow materially safer and simpler through Runix than through
+Python/Ansible plus the native tools?
+
+    collect package + service + journal state across the fleet
+    -> join and identify risky upgrades (in R)
+    -> generate a preview
+    -> obtain approval (the approval boundary)
+    -> apply in batches
+    -> verify observed post-state
+    -> resume the failures by operation id
+    -> produce a durable audit report
+
+If Runix makes that pipeline meaningfully better, it has a compelling niche.
+If it merely wraps commands in R and returns data frames, existing agents
+already do the job. The differentiators to prove out: one stable schema
+across packages/services/logs/hosts; mutations that return verified
+post-state instead of trusting exit codes; consistent preview/authorization/
+retry/cancellation/audit; fleet-wide joins and policy in R; and resumable
+operation identities with partial-failure handling.
 
 ## Deferred decisions
 
