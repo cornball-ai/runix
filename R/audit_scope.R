@@ -108,7 +108,7 @@ default_audit_sink <- function(scope = c("system", "user"),
     } else {
         .xdg_audit_path(xdg)
     }
-    list(sink = file_audit_sink(path, ...), path = path,
-         audit_scope = audit_scope,
+    list(sink = file_audit_sink(path, audit_scope = audit_scope, ...),
+         path = path, audit_scope = audit_scope,
          system_durable_audit = system_durable_audit_available(root))
 }

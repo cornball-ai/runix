@@ -34,7 +34,17 @@
 #'   the new/renamed entry is durable, not just the file's data.
 #' @param fallback \code{function(record, reason)} best-effort emitter used
 #'   when the primary write fails; must never claim durability.
-#' @return A sink: \code{list(write, path, durability, kind)}.
+#' @param id_fn \code{function()} minting a correlation id for a locally-owned
+#'   record (injectable for deterministic tests). A remote broker mints ids
+#'   itself, so its sink ignores this.
+#' @param audit_scope The scope stamped on this sink's receipts
+#'   (\code{"system"}/\code{"caller"}/\code{"user"}); \code{NA} if unset.
+#' @param clock A clock function for record timestamps.
+#' @return A sink implementing the receipt lifecycle:
+#'   \code{open_intent(record) -> receipt},
+#'   \code{write_outcome(receipt, record) -> status}, \code{emit(record,
+#'   phase) -> receipt}, plus the low-level \code{write(record)} and
+#'   \code{path}/\code{durability}/\code{audit_scope}/\code{kind}.
 #' @examples
 #' s <- file_audit_sink(tempfile(fileext = ".jsonl"), durability = "none")
 #' s$write(list(operation = "demo", outcome = "ok"))$persisted
@@ -46,7 +56,10 @@ file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
                             encoder = encode_json_line,
                             syncer = .default_syncer,
                             dir_syncer = .default_dir_syncer,
-                            fallback = .default_fallback) {
+                            fallback = .default_fallback,
+                            id_fn = new_correlation_id,
+                            audit_scope = NA_character_,
+                            clock = sys_clock()) {
     durability <- match.arg(durability)
     force(path)
     force(encoder)
@@ -75,7 +88,10 @@ file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
         list(persisted = TRUE, durability = durability, path = path)
     }
 
-    list(write = write, path = path, durability = durability, kind = "file")
+    .local_lifecycle(
+                     list(write = write, path = path, durability = durability,
+                          kind = "file"),
+                     id_fn, audit_scope, clock)
 }
 
 #' An in-memory audit sink for tests and consumers
@@ -88,13 +104,21 @@ file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
 #'   \code{TRUE}, that write reports \code{persisted = FALSE} and the record
 #'   is not stored (as if the sink failed).
 #' @param durability Reported durability label (default \code{"memory"}).
-#' @return A sink with an extra \code{records()} accessor.
+#' @param id_fn \code{function()} minting a correlation id (injectable for
+#'   deterministic tests).
+#' @param audit_scope The scope stamped on receipts; \code{NA} if unset.
+#' @param clock A clock function for record timestamps.
+#' @return A sink implementing the receipt lifecycle (see
+#'   \code{\link{file_audit_sink}}) plus a \code{records()} accessor.
 #' @examples
 #' s <- memory_audit_sink()
 #' s$write(list(outcome = "ok"))
 #' length(s$records())
 #' @export
-memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
+memory_audit_sink <- function(fail_on = NULL, durability = "memory",
+                              id_fn = new_correlation_id,
+                              audit_scope = NA_character_,
+                              clock = sys_clock()) {
     state <- new.env(parent = emptyenv())
     state$records <- list()
     write <- function(record) {
@@ -106,8 +130,33 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory") {
         list(persisted = TRUE, durability = durability)
     }
     records <- function() state$records
-    list(write = write, records = records, durability = durability,
-         kind = "memory")
+    .local_lifecycle(
+                     list(write = write, records = records,
+                          durability = durability, kind = "memory"),
+                     id_fn, audit_scope, clock)
+}
+
+## Add the receipt-based lifecycle (open_intent / write_outcome / emit) to any
+## sink exposing write(record). A local sink mints its own correlation ids
+## (id_fn) and stamps its audit_scope on receipts; a remote broker sink
+## implements this same interface differently (ids minted server-side, binding
+## carried in the receipt), so consumers depend only on the interface.
+.local_lifecycle <- function(base, id_fn, audit_scope, clock) {
+    emit <- function(record, phase = "outcome", correlation_id = id_fn()) {
+        res <- base$write(.finish_record(record, correlation_id, phase,
+                                         clock()))
+        list(correlation_id = correlation_id, persisted = isTRUE(res$persisted),
+             audit_scope = audit_scope, binding = correlation_id,
+             error = res$error)
+    }
+    open_intent <- function(record) emit(record, "intent")
+    write_outcome <- function(receipt, record) {
+        res <- base$write(.finish_record(record, receipt$correlation_id,
+                                         "outcome", clock()))
+        list(persisted = isTRUE(res$persisted), error = res$error)
+    }
+    c(base, list(open_intent = open_intent, write_outcome = write_outcome,
+                 emit = emit, audit_scope = audit_scope))
 }
 
 ## --- the append critical section -------------------------------------------

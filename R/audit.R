@@ -81,22 +81,23 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 #' @param record A named list: the record's domain content.
 #' @param phase Record phase, e.g. \code{"intent"}, \code{"outcome"},
 #'   \code{"preview"}, \code{"noop"}.
-#' @param correlation_id The operation id (mint with
-#'   \code{\link{new_correlation_id}}); default mints a fresh one.
-#' @param clock A clock function for the timestamp.
-#' @return \code{list(persisted, correlation_id, error)}.
+#' @param correlation_id Optional operation id; default lets the sink mint one
+#'   (the broker mints server-side; local sinks use their \code{id_fn}).
+#' @return A receipt: \code{list(correlation_id, persisted, audit_scope,
+#'   binding, error)}.
 #' @examples
 #' s <- memory_audit_sink()
 #' audit_emit(s, list(operation = "demo.op", effect_issued = FALSE,
 #'     outcome = "preview"), phase = "preview")$persisted
 #' @export
 audit_emit <- function(sink, record, phase = "outcome",
-                       correlation_id = new_correlation_id(),
-                       clock = sys_clock()) {
+                       correlation_id = NULL) {
     stopifnot(is.list(record))
-    res <- sink$write(.finish_record(record, correlation_id, phase, clock()))
-    list(persisted = isTRUE(res$persisted), correlation_id = correlation_id,
-         error = res$error)
+    if (is.null(correlation_id)) {
+        sink$emit(record, phase)
+    } else {
+        sink$emit(record, phase, correlation_id)
+    }
 }
 
 #' Run a mutation under the two-phase durable-audit discipline
@@ -114,7 +115,9 @@ audit_emit <- function(sink, record, phase = "outcome",
 #'
 #' The driver is deliberately generic (it takes callbacks), so it carries no
 #' systemd/apt semantics; a subsystem supplies the record content and the
-#' effect.
+#' effect. The \code{correlation_id} is minted by the \code{sink} (locally, or
+#' server-side for a broker sink) via \code{open_intent}, so no remote id
+#' authority has to be forced into a local generator.
 #'
 #' @param sink An audit sink (see \code{\link{file_audit_sink}},
 #'   \code{\link{memory_audit_sink}}).
@@ -131,11 +134,9 @@ audit_emit <- function(sink, record, phase = "outcome",
 #' @param on_intent_failure \code{"fail_closed"} (default: abort before any
 #'   effect if the intent is not durable) or \code{"degrade"} (proceed, but
 #'   report \code{audit_persisted = FALSE}).
-#' @param id_fn \code{function()} minting the correlation id (injectable).
-#' @param clock A clock function for record timestamps.
 #' @return A list with \code{correlation_id}, \code{result} (the effect's
-#'   return), \code{intent_persisted}, \code{outcome_persisted}, and
-#'   \code{audit_persisted}.
+#'   return), \code{audit_scope}, \code{intent_persisted},
+#'   \code{outcome_persisted}, and \code{audit_persisted}.
 #' @examples
 #' s <- memory_audit_sink()
 #' out <- audit_two_phase(s,
@@ -143,26 +144,26 @@ audit_emit <- function(sink, record, phase = "outcome",
 #'         effect_issued = FALSE, outcome = "intent"),
 #'     effect = function(cid) list(ok = TRUE),
 #'     outcome = function(r) list(operation = "demo.op", resource = "thing",
-#'         effect_issued = TRUE, outcome = "ok"),
-#'     id_fn = function() new_correlation_id(counter = 1L))
+#'         effect_issued = TRUE, outcome = "ok"))
 #' out$audit_persisted
 #' @export
 audit_two_phase <- function(sink, intent, effect, outcome, on_error = NULL,
-                            on_intent_failure = c("fail_closed", "degrade"),
-                            id_fn = new_correlation_id, clock = sys_clock()) {
+                            on_intent_failure = c("fail_closed", "degrade")) {
     on_intent_failure <- match.arg(on_intent_failure)
     stopifnot(is.function(effect), is.function(outcome), is.list(intent),
               is.null(on_error) || is.function(on_error))
-    cid <- id_fn()
 
-    ir <- audit_emit(sink, intent, "intent", cid, clock)
-    if (!isTRUE(ir$persisted) && identical(on_intent_failure, "fail_closed")) {
+    receipt <- sink$open_intent(intent)
+    if (!isTRUE(receipt$persisted) &&
+        identical(on_intent_failure, "fail_closed")) {
         runix_abort(
                     paste0("intent audit not durable; refusing to issue effect (",
-                if (is.null(ir$error)) "unknown" else ir$error, ")"),
+                if (is.null(receipt$error)) "unknown" else receipt$error, ")"),
                     subclass = "runix_audit_error",
-                    data = list(correlation_id = cid, phase = "intent"))
+                    data = list(correlation_id = receipt$correlation_id,
+                                phase = "intent"))
     }
+    cid <- receipt$correlation_id
 
     result <- tryCatch(
                        effect(cid),
@@ -173,19 +174,20 @@ audit_two_phase <- function(sink, intent, effect, outcome, on_error = NULL,
         } else {
             on_error(e, cid)
         }
-        orr <- audit_emit(sink, rec, "outcome", cid, clock)
+        st <- sink$write_outcome(receipt, rec)
         ## Annotate but never mask: the original condition (class and data)
         ## is re-raised, plus the correlation id and audit status.
         e$correlation_id <- cid
-        e$audit_persisted <- isTRUE(ir$persisted) && isTRUE(orr$persisted)
+        e$audit_persisted <- isTRUE(receipt$persisted) && isTRUE(st$persisted)
         stop(e)
     })
 
-    orr <- audit_emit(sink, outcome(result), "outcome", cid, clock)
+    st <- sink$write_outcome(receipt, outcome(result))
 
     list(correlation_id = cid,
          result = result,
-         intent_persisted = isTRUE(ir$persisted),
-         outcome_persisted = isTRUE(orr$persisted),
-         audit_persisted = isTRUE(ir$persisted) && isTRUE(orr$persisted))
+         audit_scope = receipt$audit_scope,
+         intent_persisted = isTRUE(receipt$persisted),
+         outcome_persisted = isTRUE(st$persisted),
+         audit_persisted = isTRUE(receipt$persisted) && isTRUE(st$persisted))
 }
