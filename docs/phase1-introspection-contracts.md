@@ -20,7 +20,7 @@ packages **before** any backend is chosen, per the Phase 1 kickoff constraints:
 Two packages. Names provisional (rsystemd is already in PLAN.md; the apt-read
 name needs Troy's sign-off):
 
-- **rdpkg** — installed-package state (dpkg) and archive/candidate state (apt):
+- **pkgstate** — installed-package state (dpkg) and archive/candidate state (apt):
   what is installed, what is available, where it comes from.
 - **rsystemd** — units, timers, journal, system state. Read-only subset of
   PLAN.md's rsystemd; the mutation API (`systemd_start()` etc.) waits for
@@ -40,7 +40,7 @@ Shared conventions live in this doc, not in a shared package (no premature
   is an error, not an empty result — emptiness must mean "queried fine,
   nothing there".
 - Typed conditions: errors inherit from `runix_error`; per-package subclasses
-  `rdpkg_error`, `rsystemd_error`; parse failures add `runix_parse_error`.
+  `pkgstate_error`, `rsystemd_error`; parse failures add `runix_parse_error`.
 - All time columns are `POSIXct` in UTC. All size columns are numeric bytes.
 - Backend functions are injectable: each package has an
   internal runner the tests replace with fakes; exported functions never call
@@ -66,7 +66,7 @@ Shared conventions live in this doc, not in a shared package (no premature
 - No masking of base names; no non-base dependencies in Imports beyond what
   the chosen backend forces (target: zero).
 
-## rdpkg contract
+## pkgstate contract
 
 ```r
 dpkg_installed()
@@ -144,7 +144,7 @@ apt_policy(package)
 #       versions (data.frame: version, version_priority (effective,
 #       integer), priority (source), origin, site, suite, component,
 #       installed)
-# Unknown package: an error (class rdpkg_unknown_package) — a diagnostic
+# Unknown package: an error (class pkgstate_unknown_package) — a diagnostic
 # view of nothing is a question answered "no such package", unlike the
 # bulk views' zero-row semantics.
 
@@ -160,9 +160,9 @@ apt_cache_timestamps()
 ```
 
 Origin classification (which origins count as Ubuntu main vs universe vs
-ESM vs third-party) is **deliberately not** an rdpkg API: it is Ubuntu policy,
+ESM vs third-party) is **deliberately not** an pkgstate API: it is Ubuntu policy,
 not package state. It belongs to the acceptance consumer, driven by fixtures
-(see below). rdpkg's job ends at faithful origin rows.
+(see below). pkgstate's job ends at faithful origin rows.
 
 ## rsystemd contract
 
@@ -226,11 +226,11 @@ read-only, injectable runners, native-shaped return types).
 
 ## Acceptance: ubuntu-security-status as consumer
 
-Done means: a short R script using only rdpkg exported functions reproduces,
+Done means: a short R script using only pkgstate exported functions reproduces,
 on this machine, the package counts ubuntu-security-status reports (packages by
 origin class, ESM-eligible counts), validated against the live tool's output.
 
-**Status: met 2026-08-07.** rdpkg's acceptance test mirrors uaclient's
+**Status: met 2026-08-07.** pkgstate's acceptance test mirrors uaclient's
 classifier (`get_origin_for_installed_package`: installed version's sources
 in order; candidate fallback when the installed version is status-only;
 first Ubuntu source's component wins) from `dpkg_installed()` +
@@ -303,11 +303,11 @@ candidate, needs Phase 2/3 first); packaging/distribution (Phase 6).
 
 ## Decisions (Troy, 2026-08-07)
 
-1. **Package name: rdpkg.** Read-only, scope stated explicitly: dpkg
+1. **Package name: pkgstate.** Read-only, scope stated explicitly: dpkg
    status/database plus apt metadata queries (candidates, origins,
    upgradeability). Mutations stay in rapt; no `rapt.query`; rapt's
    dependency surface does not grow.
-2. **Repositories: top-level `~/rdpkg` and `~/rsystemd`**, matching the
+2. **Repositories: top-level `~/pkgstate` and `~/rsystemd`**, matching the
    independent-package architecture — no later repository split. Local-only
    for now (no GitHub); work happens on feature branches over the skeleton
    baseline commit.
@@ -320,7 +320,7 @@ Thin and acyclic. Arrows are the only permitted dependency directions:
 rctl (CLI frontend)
   |
   v
-subsystem packages: rdpkg, rsystemd, rudev, rnetwork, rpolkit, ...
+subsystem packages: pkgstate, rsystemd, rudev, rnetwork, rpolkit, ...
   |
   v
 runix (small common layer)
@@ -332,7 +332,7 @@ runix (small common layer)
 - Subsystem packages never import each other, and nothing imports upward.
 - **rctl** is the CLI frontend over the subsystem APIs, nothing more.
 - Phase 1 note: the injectable runner and condition helpers are deliberately
-  duplicated in rdpkg and rsystemd for now; they migrate down into runix once
+  duplicated in pkgstate and rsystemd for now; they migrate down into runix once
   the pattern survives review, not before.
 
 **rnetwork and Netplan**: rnetwork is the eventual home for both
@@ -366,7 +366,7 @@ subsystem packages and bind the whole stack:
   and audit records;
 - arbitrary R evaluation is **never** a privilege mechanism.
 
-Division of labor: rdpkg, rsystemd, and later subsystem packages expose
+Division of labor: pkgstate, rsystemd, and later subsystem packages expose
 deterministic R APIs (this contract); `rctl --json` and a future agent
 protocol adapt those APIs for automation. Orchestrators — corteza-based
 agents and other harnesses — drive the public interfaces only.
@@ -374,7 +374,7 @@ agents and other harnesses — drive the public interfaces only.
 **rctl launcher (recorded 2026-08-07)**: littler (`r`) is the CLI launcher —
 fast startup, conventional Unix command behavior — and nothing more:
 `rctl → littler launcher → Runix APIs → subsystem packages`. littler never
-appears in rdpkg, rsystemd, or the common layer; it is an explicit
+appears in pkgstate, rsystemd, or the common layer; it is an explicit
 dependency of the CLI package alone (the Ubuntu `.deb` may Depend on it),
 with an `Rscript` fallback for portability. It optimizes delivery and
 startup; it does not shape the subsystem APIs.
@@ -391,7 +391,7 @@ fixtures are committed artifacts, not build-time products.
 
 - `~/runix` — umbrella: PLAN.md, this contract, the Phase 0 inventory.
   No package code.
-- `~/rdpkg` — apt/dpkg read APIs. Scaffolded 2026-08-07 (0.0.1, MIT,
+- `~/pkgstate` — apt/dpkg read APIs. Scaffolded 2026-08-07 (0.0.1, MIT,
   OS_type: unix, tinytest wired, installs and tests clean).
 - `~/rsystemd` — systemd read APIs. Same scaffold, same date.
 - Neither package depends on the other; both are governed by this contract.

@@ -35,7 +35,7 @@ breaking envelope changes:
   "operation": "packages.upgradable",
   "ok": false,
   "error": {
-    "class": ["rdpkg_error", "runix_error"],
+    "class": ["pkgstate_error", "runix_error"],
     "message": "apt-cache policy failed with status 100",
     "retryable": true,
     "resource": "apt-cache"
@@ -59,7 +59,7 @@ The `error` object is the machine rendering of the typed R conditions the
 subsystem packages already raise:
 
 - `class`: the R condition class vector, most specific first
-  (e.g. `["rdpkg_unknown_package", "rdpkg_error", "runix_error"]`).
+  (e.g. `["pkgstate_unknown_package", "pkgstate_error", "runix_error"]`).
 - `message`: human-readable, for logs — agents branch on `class`, never
   on `message`.
 - `retryable`: boolean. Each condition class documents its retryability;
@@ -128,7 +128,7 @@ never leaves stdout empty).
       "services.info", "services.timers", "services.journal",
       "services.state"],
     "subsystems": {
-      "rdpkg": {"present": true, "version": "0.0.1.5"},
+      "pkgstate": {"present": true, "version": "0.0.1.5"},
       "rsystemd": {"present": true, "version": "0.0.1.3"}
     }
   }

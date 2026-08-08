@@ -22,7 +22,7 @@ code.
 
 | Package | Scope | Status |
 |---|---|---|
-| [rdpkg](https://github.com/cornball-ai/rdpkg) | dpkg/apt read-only introspection | experimental |
+| [pkgstate](https://github.com/cornball-ai/pkgstate) | dpkg/apt read-only introspection | experimental |
 | [rsystemd](https://github.com/cornball-ai/rsystemd) | systemd read-only introspection | experimental |
 | [rapt](https://github.com/cornball-ai/rapt) | apt mutations (Python-free bspm replacement) | shipping |
 
