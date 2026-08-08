@@ -8,6 +8,7 @@ audit_two_phase(
   intent,
   effect,
   outcome,
+  on_error = NULL,
   on_intent_failure = c("fail_closed", "degrade"),
   id_fn = new_correlation_id,
   clock = sys_clock()
@@ -24,6 +25,12 @@ returns a result (any value) describing what happened.}
 
 \item{outcome}{\code{function(result)} returning the outcome record's
 domain content (a named list).}
+
+\item{on_error}{Optional \code{function(cond, correlation_id)} returning the
+outcome record's domain content when the effect raises, so a typed
+failure (its class and observed data) is recorded richly rather than as a
+generic error. The original condition is always re-raised unchanged apart
+from the added \code{correlation_id}/\code{audit_persisted}.}
 
 \item{on_intent_failure}{\code{"fail_closed"} (default: abort before any
 effect if the intent is not durable) or \code{"degrade"} (proceed, but
@@ -44,8 +51,11 @@ effect, then writes an \emph{outcome} record; both share one
 \code{correlation_id}. If the intent cannot be persisted, the effect is not
 issued (fail-closed) unless \code{on_intent_failure = "degrade"}. If the
 effect itself errors, an error outcome record is still written before the
-error propagates (no silent error paths). \code{audit_persisted} is
-\code{TRUE} only when both writes persisted.
+error propagates (no silent error paths), and the raised condition is
+annotated with the \code{correlation_id} and \code{audit_persisted} so a
+caller can correlate the failure. Outcome-write failure never masks the
+effect's result or error. \code{audit_persisted} is \code{TRUE} only when
+both writes persisted.
 }
 \details{
 The driver is deliberately generic (it takes callbacks), so it carries no

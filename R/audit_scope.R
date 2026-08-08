@@ -6,7 +6,8 @@
 
 ## Is the effective user root? Injectable via callers for testing.
 .euid_is_root <- function() {
-    eu <- tryCatch(Sys.info()[["effective_user"]], error = function(e) NA_character_)
+    eu <- tryCatch(Sys.info()[["effective_user"]],
+                   error = function(e) NA_character_)
     identical(eu, "root")
 }
 
@@ -75,7 +76,7 @@ audit_scope_for <- function(scope = c("system", "user"),
 #' system_durable_audit_available(root = FALSE)
 #' @export
 system_durable_audit_available <- function(root = .euid_is_root(),
-                                           broker = FALSE) {
+    broker = FALSE) {
     isTRUE(root) || isTRUE(broker)
 }
 
@@ -107,8 +108,7 @@ default_audit_sink <- function(scope = c("system", "user"),
     } else {
         .xdg_audit_path(xdg)
     }
-    list(sink = file_audit_sink(path, ...),
-         path = path,
+    list(sink = file_audit_sink(path, ...), path = path,
          audit_scope = audit_scope,
          system_durable_audit = system_durable_audit_available(root))
 }
