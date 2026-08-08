@@ -188,6 +188,64 @@ sl2 <- file_audit_sink(lp, durability = "none", lock_timeout = 3,
                        lock_stale = 3600)             # mtime path won't fire
 expect_true(sl2$write(list(x = 1))$persisted)         # stole the dead-owner lock
 
+## --- reboot detection: an owner from a different boot is stale -> stolen ---
+if (file.exists("/proc/sys/kernel/random/boot_id")) {
+    lb <- file.path(td, "bootlock.jsonl")
+    file.create(lb)
+    ldb <- paste0(lb, ".lock")
+    dir.create(ldb)
+    writeLines(paste(Sys.getpid(),
+                     "00000000-0000-0000-0000-000000000000", "1"),
+               file.path(ldb, "owner"))              # different boot id
+    sboot <- file_audit_sink(lb, durability = "none", lock_timeout = 3,
+                             lock_stale = 3600)
+    expect_true(sboot$write(list(x = 1))$persisted)
+}
+
+## --- PID reuse: live pid but wrong start time is stale -> stolen ---
+if (dir.exists(file.path("/proc", Sys.getpid()))) {
+    lr <- file.path(td, "reuselock.jsonl")
+    file.create(lr)
+    ldr <- paste0(lr, ".lock")
+    dir.create(ldr)
+    writeLines(paste(Sys.getpid(), "-", "1"),        # bogus start time
+               file.path(ldr, "owner"))
+    sreuse <- file_audit_sink(lr, durability = "none", lock_timeout = 3,
+                              lock_stale = 3600)
+    expect_true(sreuse$write(list(x = 1))$persisted)
+}
+
+## --- a genuinely live owner (correct pid+boot+start time) is NOT stolen ---
+ll <- file.path(td, "livelock.jsonl")
+file.create(ll)
+ldl <- paste0(ll, ".lock")
+dir.create(ldl)
+runix:::.write_lock_owner(ldl)                        # this live process
+slive <- file_audit_sink(ll, durability = "none", lock_timeout = 1,
+                         lock_stale = 3600, fallback = silent_fb)
+expect_false(slive$write(list(x = 1))$persisted)      # live owner respected
+
+## --- parent directory is fsync'd on create/rotation, not on plain append ---
+dcalls <- new.env()
+dcalls$file <- 0L
+dcalls$dir <- 0L
+dp <- file.path(td, "dirsync.jsonl")
+sd <- file_audit_sink(dp, durability = "fsync",
+    syncer = function(p) {
+        dcalls$file <- dcalls$file + 1L
+        invisible(TRUE)
+    },
+    dir_syncer = function(d) {
+        dcalls$dir <- dcalls$dir + 1L
+        invisible(TRUE)
+    })
+sd$write(list(x = 1))                                 # creates -> dir fsync
+expect_equal(dcalls$dir, 1L)
+expect_equal(dcalls$file, 1L)
+sd$write(list(x = 2))                                 # append only -> no dir fsync
+expect_equal(dcalls$dir, 1L)
+expect_equal(dcalls$file, 2L)
+
 ## --- multi-process concurrency: no torn/interleaved lines under contention ---
 ## Local only (needs littler + installed runix); skipped during R CMD check.
 if (at_home() && nzchar(Sys.which("r"))) {
