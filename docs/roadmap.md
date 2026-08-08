@@ -85,7 +85,8 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    unauthorized) currently carry `observed` state but emit **no** audit
    record — only successful results do. The contract says audit every
    effect including failures; fix this when building the sink. Prior art:
-   corteza's JSONL diagnostics, viento's fsync'd WAL.
+   corteza's JSONL diagnostics; fsync'd write-ahead logging in internal
+   cornball tooling.
    **Contract written:** `durable-audit-contract.md` (two-phase
    intent/outcome, the four separated facts, fail-closed before any
    un-recorded effect, honest `audit_persisted`); implementation pending.
