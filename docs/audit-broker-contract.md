@@ -111,6 +111,17 @@ broker-minted id in the receipt (with the opaque `binding`), and whose
 `write_outcome` sends the outcome with that receipt. No changes to
 `audit_two_phase` or the consumers; only the sink differs.
 
+**The R client parses responses too.** The broker is not the only parse
+boundary: the R adapter parses the broker's response frames (with yyjsonr,
+not jansson). The response is trusted local IPC, but the adapter must still
+enforce the same frame limits (version, hard length cap) and an **exact
+response schema** (known fields, correct types), and fail closed on anything
+else. Because the two sides use different JSON libraries, the protection is
+**cross-library conformance tests**: shared fixtures (valid and malformed
+frames, edge-case records) run through both the jansson broker and the
+yyjsonr adapter, asserting identical accept/reject decisions. A shared
+implementation is explicitly not the mechanism.
+
 ## Wire protocol (pinned before implementation)
 
 The protocol is small, versioned, and rigid. It is fixed here so the C build
@@ -122,9 +133,16 @@ implements a spec rather than inventing one.
   exceeds the maximum, or does not match the bytes received is a typed error
   and the connection is closed. Versioning lets the broker reject an
   unsupported client rather than guess.
-- **Body: strict UTF-8 JSON**, parsed by an **existing, maintained, audited C
-  JSON library** with strict UTF-8 and size limits. **No hand-written
-  parser** (the parser is the largest attack surface; do not build one).
+- **Body: strict UTF-8 JSON**, parsed by **Jansson** (the system,
+  apt-serviced library) with `JSON_REJECT_DUPLICATES` (native duplicate-key
+  rejection), strict EOF (reject trailing content), `JSON_VALIDATE_UTF8`, and
+  a bounded parse depth. **No hand-written parser** (the parser is the largest
+  attack surface; do not build one). Jansson is chosen over json-c
+  specifically because json-c 0.17 cannot reject duplicate keys (it silently
+  keeps last-wins); both are apt-serviced from Ubuntu main, so the supply-chain
+  posture is unchanged. yyjson would require vendoring (no system package) and
+  a janssonr R package was rejected: the C broker and the R stack interoperate
+  through this wire schema, not a shared library.
 - **Two request types only:** `open_intent` and `write_outcome`. Any other
   type is a typed `unknown_request` error. There is no general command
   channel.
@@ -225,3 +243,10 @@ Protocol and abuse tests (a lying or hostile client):
     intents from before the restart remain queryable.
 19. **Disconnect after intent** — a client that drops right after
     `open_intent` returns leaves the intent durable and open, never erased.
+20. **Client-side response validation** — the R adapter rejects a response
+    frame that violates the version/length limits or the exact response
+    schema, and fails closed rather than trusting a malformed reply.
+21. **Cross-library conformance** — shared fixtures (valid and malformed
+    frames, edge-case records) produce identical accept/reject decisions
+    through the jansson broker and the yyjsonr adapter; the two independent
+    parsers agree on the wire schema.
