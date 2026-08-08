@@ -54,6 +54,7 @@ list(
   before        = list(...),          # observed pre-state (verb-specific)
   after         = list(...),          # observed post-state (NA in preview)
   planned       = list(...),          # the intended change (always present)
+  completion    = list(...),          # how the job was correlated (below)
   audit         = list(...)           # the audit record (below)
 )
 ```
@@ -140,6 +141,62 @@ carried in `before`/`after` when the type provides it, and its absence is
 data, never an error. A restart that does not reach the postcondition is
 `changed = FALSE` with the failure visible in `after` (and surfaced as a
 `runix_operation_failed` error if the job itself failed).
+
+## Job correlation: proving *this* queued job completed
+
+The `--no-block` + poll design has a correlation hazard the poll loop must
+close: `systemctl --no-block` returns before the job runs, so polling only
+for the desired post-state can observe a *stale* state and report success
+before the new job executed. The sharp case is `restart` of an already
+`active` unit — it is `active` before, during, and after, so "poll until
+active" can return instantly against the old activation. Oneshot units
+(`active/exited`, `MainPID = 0`) have the same hazard.
+
+The rule: **the poll loop must confirm a fresh invocation ran, not merely
+that the desired state is observable.** Backends establish this in tiers,
+strongest first:
+
+1. **Native sd-bus (future backend)**: `StartUnit`/`StopUnit`/`RestartUnit`
+   return a job object path; watch the `JobRemoved` signal for that exact
+   path and record its result (`done`/`failed`/`canceled`/…). This is
+   definitive — the job is identified, not inferred.
+2. **CLI bridge (current backend)**: capture a **per-invocation marker** in
+   `before` and poll until it advances *and* the per-type postcondition
+   holds. Every unit type exposes one (verified on systemd 255):
+   - `InvocationID` — a fresh 128-bit id per (re)start, present on
+     services, oneshots, sockets, targets. The primary marker: a
+     `restart`/`start` is confirmed when `after$invocation_id !=
+     before$invocation_id`.
+   - `StateChangeTimestampMonotonic` (and `ActiveEnterTimestampMonotonic`)
+     — monotonic, advances on the transition; corroborating evidence and
+     the fallback where an invocation id is absent or unchanged.
+   For `stop`, correlation is inherent: the target is *leaving* the active
+   set, an unambiguous transition (and `InvocationID` clears), so no
+   stale-state hazard exists. For `start` of an inactive unit, the
+   `inactive → active` transition is itself the fresh-invocation proof.
+   `restart` is the case that genuinely needs the invocation-id compare.
+3. **Fallback — report, don't fabricate**: if a unit type exposes no marker
+   that can be shown to advance within `timeout` and the bridge therefore
+   cannot establish completion, the verb reports `outcome = "submitted"`
+   with `changed = NA` and `state_changed = NA` — an honest "the job was
+   queued; completion could not be confirmed", never a claimed mutation.
+
+**Completion evidence is exposed, not just used.** `runix_result` carries a
+`completion` field recording how the job was correlated:
+
+```r
+completion = list(
+  method   = "invocation_id" | "job_result" | "state_monotonic" |
+             "submitted_unconfirmed",
+  job_id   = <sd-bus job path or NA>,       # native backend
+  job_result = <"done"/"failed"/... or NA>, # native backend
+  invocation_before = <id or NA>,
+  invocation_after  = <id or NA>
+)
+```
+
+The audit record carries the same `method` and `job_result`, so "how did we
+know this completed" is auditable, not an unstated assumption.
 
 ## Timeout and cancellation
 
@@ -228,9 +285,11 @@ list(
   state_changed = TRUE,
   actor     = "<uid/name of caller>",
   authorized_via = "polkit:org.freedesktop.systemd1.manage-units",
+  completion_method = "invocation_id",  # from result$completion$method
+  job_result = "done",                  # native backend, else NA
   time      = <POSIXct UTC>,
-  outcome   = "ok" | "unauthorized" | "timeout" | "cancelled" |
-              "failed" | "error"
+  outcome   = "ok" | "submitted" | "unauthorized" | "timeout" |
+              "cancelled" | "failed" | "error"
 )
 ```
 
