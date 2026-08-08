@@ -182,9 +182,15 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    (`SO_PEERCRED`), append-only privileged writer that appends a caller's
    validated record to the system sink. Explicitly **not** the apt `pkexec`
    helper (different privilege surface; a prompt would break autonomous
-   operation). Evaluate journald as a weaker existing broker first. **Contract
-   stub written:** `audit-broker-contract.md`. Its presence flips
-   `system_durable_audit` to `true`.
+   operation). **Contract written:** `audit-broker-contract.md` (socket
+   activation, broker-owned path, `SO_PEERCRED` identity, broker-minted intent
+   ids, outcome bound to actor/intent, strict framing/schema/size, rate
+   limits, hardened atomic append+fsync, crash-gap preservation, no mutation
+   authority). journald evaluated: qualifies only as a **weaker** broker
+   (submission is not durable persistence; `SyncIntervalSec`, retention, and
+   rate limiting weaken the `audit_persisted` invariant), so it cannot back
+   `system_durable_audit = TRUE`. The strong broker's presence flips
+   `system_durable_audit` to `true`; implementation is the next build unit.
 
 ## Immediate sequence
 
