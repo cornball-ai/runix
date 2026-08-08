@@ -94,6 +94,15 @@ never leaves stdout empty).
   object key order is not significant.
 - Integers and doubles → JSON numbers, never scientific notation, never
   locale-formatted. Logicals → `true`/`false`.
+- **Numeric lexical form** (decided 2026-08-07): backend-specific but
+  deterministic. The encoder is yyjsonr (minimum tested version pinned in
+  rctl's DESCRIPTION, currently 0.1.22), which writes whole doubles
+  type-faithfully with a `.0` marker (`22671360.0`) and integers bare
+  (`42`); whole doubles ≥ 1e15 pass through rctl's validated integer
+  token and emit bare and exact. Agent consumers MUST compare parsed
+  JSON semantics, not raw bytes — the byte-level launcher-parity test is
+  an rctl-internal invariant (same binary, both launchers), not a
+  cross-version stability promise for numeric spellings.
 - Strings are always valid UTF-8. Fields that originate as byte arrays
   (journal messages) are converted at the R API layer; rctl must never
   emit invalid UTF-8 — invalid sequences are replaced with U+FFFD and a
