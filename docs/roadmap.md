@@ -13,6 +13,52 @@ Python itself, or a recreation of every GUI/daemon. Python admin tools are
 the migration targets and prior art; apt, systemd, D-Bus, NetworkManager,
 and dpkg remain the underlying machinery. (Refines PLAN.md's Working Thesis.)
 
+## Why Runix, not the Python tools
+
+The Python admin layer (apt, aptdaemon, software-properties, netplan,
+cloud-init, ...) is a set of bespoke tools that emit human-readable text,
+each with its own error style, idempotence story, and D-Bus quirks. Runix
+does not replace what they *do* — apt and systemd still do the work — it
+replaces the *interface contract*: one typed surface over all of them, with
+a shared result object, condition taxonomy, and preview/audit/authorization
+discipline.
+
+The deeper bet: system administration is a data problem that got flattened
+into text because the tools were built for humans at a terminal. Package
+state, unit state, upgrade candidates, journal entries are tables and time
+series wearing text costumes. R is a query engine for tables, so an R admin
+layer returns `data.frame`s you can filter, join, and `rbind()` across a
+fleet instead of re-parsing stdout per host. Match the tool to the true
+shape of the data.
+
+This payoff is conditional. For one machine with a human at the keyboard,
+the native tools are fine and Runix is ceremony. The value shows up at fleet
+scale, under agent operation, and where auditability matters — the intended
+workload, not a single desktop.
+
+r2u/rapt is the install *transport* that carries these packages to the fleet
+(fast, Python-free), not the foundation. The foundation is the
+typed-API-over-native-interfaces spine (the `runix` common core).
+
+## Authorization policy: effect class
+
+Authorization is drawn by **effect class**, not by tool or verb:
+
+- **Human-gated** — hard-to-reverse, trust-boundary-crossing operations
+  (package install/remove, repository add, key import). These require an
+  explicit human gate (sudo + password / polkit prompt). An agent proposes;
+  a human authorizes.
+- **Agent-autonomous** — routine operations inside an already-trusted set
+  (service restart/enable, unattended security updates, cache refresh).
+  These run without a prompt but stay previewable and audited.
+
+Runix's job is to **surface which class an operation is in** so the caller
+(agent or human) knows when to stop and ask, via the planned-effect and
+authorization fields already on `runix_result`. polkit enforces the
+privileged gate at the D-Bus boundary; Runix makes the class legible above
+it. Gap 2 (apt mutation boundary) is where this policy becomes a concrete
+contract for the install/remove path.
+
 ## Built so far
 
 - **Phase 0** — Ubuntu Python-admin inventory (`ubuntu-python-admin-inventory.md`).
