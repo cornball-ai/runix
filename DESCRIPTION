@@ -1,7 +1,7 @@
 Package: runix
 Type: Package
 Title: Common Core for the Runix System-Administration Framework
-Version: 0.0.1
+Version: 0.0.1.1
 Date: 2026-08-08
 Authors@R: c(
     person("Troy", "Hernandez", role = c("aut", "cre"), email = "troy@cornball.ai",
@@ -10,11 +10,14 @@ Authors@R: c(
 Description: The zero-dependency common core shared by the Runix subsystem
     packages: the typed condition taxonomy and constructor, a retryability
     registry, the subsystem-neutral injectable-runner machinery (environment
-    and error class supplied by the caller), and the neutral result object.
-    Subsystem packages ('pkgstate', 'rsystemd', ...) import this; it never
-    imports them and carries no external dependencies.
+    and error class supplied by the caller), the neutral result object, a
+    deterministic JSON-line encoder, and the durable-audit sink (append-only
+    JSONL with two-phase intent/outcome correlation, advisory locking, fsync,
+    rotation, and honest persistence reporting). Subsystem packages
+    ('pkgstate', 'rsystemd', ...) import this; it never imports them and
+    carries no external dependencies.
 License: MIT + file LICENSE
 OS_type: unix
-Suggests: tinytest
+Suggests: tinytest, jsonlite
 Encoding: UTF-8
 Config/roxygen2/version: 8.0.0

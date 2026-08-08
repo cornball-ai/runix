@@ -1,9 +1,15 @@
 # tinyrox says don't edit this manually, but it can't stop you!
 
+export(audit_two_phase)
+export(encode_json_line)
+export(file_audit_sink)
 export(is_retryable)
+export(memory_audit_sink)
+export(new_correlation_id)
 export(new_runix_result)
 export(new_runner)
 export(register_retryable)
 export(runix_abort)
+export(sys_clock)
 
 S3method(print,runix_result)
