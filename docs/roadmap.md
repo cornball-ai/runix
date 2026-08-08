@@ -200,6 +200,15 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    client adapter (a broker-backed sink), (4) protocol/abuse tests, (5)
    rsystemd re-integration + live unprivileged gate before advertising the
    strong capability. The receipt-based sink interface (step 1) is done.
+   **Settled decisions:** AF_UNIX + socket activation for v1 (D-Bus deferred
+   to when `rdbus` exists); **Jansson** for the broker parser (apt-serviced,
+   native `JSON_REJECT_DUPLICATES`, which json-c cannot do); no `janssonr` R
+   package (the C broker and R stack meet at the wire schema, not a shared
+   library; `yyjsonr` stays on the R side). Repo:
+   `cornball-ai/runix-audit-broker`; the json-c-independent core (framing,
+   hardened sink, peer creds, getrandom ids/bindings) is implemented and
+   passes under ASan/UBSan (draft PR #1). Build binary/tests pending
+   `libjansson-dev`.
 
 ## Immediate sequence
 
