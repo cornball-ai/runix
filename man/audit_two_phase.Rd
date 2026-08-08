@@ -9,9 +9,7 @@ audit_two_phase(
   effect,
   outcome,
   on_error = NULL,
-  on_intent_failure = c("fail_closed", "degrade"),
-  id_fn = new_correlation_id,
-  clock = sys_clock()
+  on_intent_failure = c("fail_closed", "degrade")
 )
 }
 \arguments{
@@ -35,15 +33,11 @@ from the added \code{correlation_id}/\code{audit_persisted}.}
 \item{on_intent_failure}{\code{"fail_closed"} (default: abort before any
 effect if the intent is not durable) or \code{"degrade"} (proceed, but
 report \code{audit_persisted = FALSE}).}
-
-\item{id_fn}{\code{function()} minting the correlation id (injectable).}
-
-\item{clock}{A clock function for record timestamps.}
 }
 \value{
 A list with \code{correlation_id}, \code{result} (the effect's
-  return), \code{intent_persisted}, \code{outcome_persisted}, and
-  \code{audit_persisted}.
+  return), \code{audit_scope}, \code{intent_persisted},
+  \code{outcome_persisted}, and \code{audit_persisted}.
 }
 \description{
 Writes a durable \emph{intent} record before the effect boundary, issues the
@@ -60,7 +54,9 @@ both writes persisted.
 \details{
 The driver is deliberately generic (it takes callbacks), so it carries no
 systemd/apt semantics; a subsystem supplies the record content and the
-effect.
+effect. The \code{correlation_id} is minted by the \code{sink} (locally, or
+server-side for a broker sink) via \code{open_intent}, so no remote id
+authority has to be forced into a local generator.
 
 }
 \examples{
@@ -70,7 +66,6 @@ out <- audit_two_phase(s,
         effect_issued = FALSE, outcome = "intent"),
     effect = function(cid) list(ok = TRUE),
     outcome = function(r) list(operation = "demo.op", resource = "thing",
-        effect_issued = TRUE, outcome = "ok"),
-    id_fn = function() new_correlation_id(counter = 1L))
+        effect_issued = TRUE, outcome = "ok"))
 out$audit_persisted
 }

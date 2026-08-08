@@ -58,8 +58,7 @@ file_audit_sink <- function(path, durability = c("fsync", "flush", "none"),
                             dir_syncer = .default_dir_syncer,
                             fallback = .default_fallback,
                             id_fn = new_correlation_id,
-                            audit_scope = NA_character_,
-                            clock = sys_clock()) {
+                            audit_scope = NA_character_, clock = sys_clock()) {
     durability <- match.arg(durability)
     force(path)
     force(encoder)
@@ -144,7 +143,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory",
 .local_lifecycle <- function(base, id_fn, audit_scope, clock) {
     emit <- function(record, phase = "outcome", correlation_id = id_fn()) {
         res <- base$write(.finish_record(record, correlation_id, phase,
-                                         clock()))
+                clock()))
         list(correlation_id = correlation_id, persisted = isTRUE(res$persisted),
              audit_scope = audit_scope, binding = correlation_id,
              error = res$error)
@@ -152,7 +151,7 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory",
     open_intent <- function(record) emit(record, "intent")
     write_outcome <- function(receipt, record) {
         res <- base$write(.finish_record(record, receipt$correlation_id,
-                                         "outcome", clock()))
+                "outcome", clock()))
         list(persisted = isTRUE(res$persisted), error = res$error)
     }
     c(base, list(open_intent = open_intent, write_outcome = write_outcome,

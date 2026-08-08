@@ -90,8 +90,7 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 #' audit_emit(s, list(operation = "demo.op", effect_issued = FALSE,
 #'     outcome = "preview"), phase = "preview")$persisted
 #' @export
-audit_emit <- function(sink, record, phase = "outcome",
-                       correlation_id = NULL) {
+audit_emit <- function(sink, record, phase = "outcome", correlation_id = NULL) {
     stopifnot(is.list(record))
     if (is.null(correlation_id)) {
         sink$emit(record, phase)

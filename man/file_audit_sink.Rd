@@ -15,7 +15,10 @@ file_audit_sink(
   encoder = encode_json_line,
   syncer = .default_syncer,
   dir_syncer = .default_dir_syncer,
-  fallback = .default_fallback
+  fallback = .default_fallback,
+  id_fn = new_correlation_id,
+  audit_scope = NA_character_,
+  clock = sys_clock()
 )
 }
 \arguments{
@@ -51,9 +54,22 @@ the new/renamed entry is durable, not just the file's data.}
 
 \item{fallback}{\code{function(record, reason)} best-effort emitter used
 when the primary write fails; must never claim durability.}
+
+\item{id_fn}{\code{function()} minting a correlation id for a locally-owned
+record (injectable for deterministic tests). A remote broker mints ids
+itself, so its sink ignores this.}
+
+\item{audit_scope}{The scope stamped on this sink's receipts
+(\code{"system"}/\code{"caller"}/\code{"user"}); \code{NA} if unset.}
+
+\item{clock}{A clock function for record timestamps.}
 }
 \value{
-A sink: \code{list(write, path, durability, kind)}.
+A sink implementing the receipt lifecycle:
+  \code{open_intent(record) -> receipt},
+  \code{write_outcome(receipt, record) -> status}, \code{emit(record,
+  phase) -> receipt}, plus the low-level \code{write(record)} and
+  \code{path}/\code{durability}/\code{audit_scope}/\code{kind}.
 }
 \description{
 Constructs the production audit sink: append-only JSONL, one record per

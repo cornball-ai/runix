@@ -3,13 +3,7 @@
 \alias{audit_emit}
 \title{Emit a single framed audit record}
 \usage{
-audit_emit(
-  sink,
-  record,
-  phase = "outcome",
-  correlation_id = new_correlation_id(),
-  clock = sys_clock()
-)
+audit_emit(sink, record, phase = "outcome", correlation_id = NULL)
 }
 \arguments{
 \item{sink}{An audit sink (see \code{\link{file_audit_sink}}).}
@@ -19,13 +13,12 @@ audit_emit(
 \item{phase}{Record phase, e.g. \code{"intent"}, \code{"outcome"},
 \code{"preview"}, \code{"noop"}.}
 
-\item{correlation_id}{The operation id (mint with
-\code{\link{new_correlation_id}}); default mints a fresh one.}
-
-\item{clock}{A clock function for the timestamp.}
+\item{correlation_id}{Optional operation id; default lets the sink mint one
+(the broker mints server-side; local sinks use their \code{id_fn}).}
 }
 \value{
-\code{list(persisted, correlation_id, error)}.
+A receipt: \code{list(correlation_id, persisted, audit_scope,
+  binding, error)}.
 }
 \description{
 Frames a domain record (adds \code{schema_version}, \code{correlation_id},
