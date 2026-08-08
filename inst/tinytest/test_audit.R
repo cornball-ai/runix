@@ -93,8 +93,7 @@ out <- audit_two_phase(ts,
         list(cid = cid, ok = TRUE)
     },
     outcome = function(r) list(operation = "demo.op", effect_issued = TRUE,
-                               outcome = "ok"),
-    id_fn = function() new_correlation_id(counter = 7L))
+                               outcome = "ok"))
 expect_true(ran$effect)
 expect_true(out$audit_persisted)
 recs <- ts$records()
@@ -102,6 +101,7 @@ expect_equal(length(recs), 2L)
 expect_equal(recs[[1]]$phase, "intent")
 expect_equal(recs[[2]]$phase, "outcome")
 expect_equal(recs[[1]]$correlation_id, recs[[2]]$correlation_id)
+expect_equal(out$correlation_id, recs[[1]]$correlation_id)  # sink-minted, shared
 
 ## --- fail-closed: intent not durable -> effect NOT issued, raises ---
 fc <- memory_audit_sink(fail_on = function(r) identical(r$phase, "intent"))
@@ -114,8 +114,7 @@ expect_error(
             ran2$effect <- TRUE
             list()
         },
-        outcome = function(r) list(outcome = "ok"),
-        id_fn = function() new_correlation_id(counter = 1L)),
+        outcome = function(r) list(outcome = "ok")),
     "not durable")
 expect_false(ran2$effect)
 
@@ -130,8 +129,7 @@ outd <- audit_two_phase(dg,
         list()
     },
     outcome = function(r) list(outcome = "ok"),
-    on_intent_failure = "degrade",
-    id_fn = function() new_correlation_id(counter = 2L))
+    on_intent_failure = "degrade")
 expect_true(ran3$effect)
 expect_false(outd$intent_persisted)
 expect_true(outd$outcome_persisted)
@@ -142,8 +140,7 @@ of <- memory_audit_sink(fail_on = function(r) identical(r$phase, "outcome"))
 outo <- audit_two_phase(of,
     intent = list(operation = "x", outcome = "intent"),
     effect = function(cid) list(ok = TRUE),
-    outcome = function(r) list(outcome = "ok"),
-    id_fn = function() new_correlation_id(counter = 3L))
+    outcome = function(r) list(outcome = "ok"))
 expect_true(outo$intent_persisted)
 expect_false(outo$outcome_persisted)
 expect_false(outo$audit_persisted)
@@ -154,8 +151,7 @@ expect_error(
     audit_two_phase(ee,
         intent = list(operation = "x", outcome = "intent"),
         effect = function(cid) stop("boom"),
-        outcome = function(r) list(outcome = "ok"),
-        id_fn = function() new_correlation_id(counter = 4L)),
+        outcome = function(r) list(outcome = "ok")),
     "boom")
 recs2 <- ee$records()
 expect_equal(length(recs2), 2L)
@@ -290,7 +286,7 @@ expect_false(is.null(rec$pid))
 expect_false(is.null(rec$time))
 
 ## --- audit_two_phase on_error: rich error outcome + cid on the condition ---
-oe <- memory_audit_sink()
+oe <- memory_audit_sink(id_fn = function() "cid-oe")   # sink mints the id now
 cond <- tryCatch(
     audit_two_phase(oe,
         intent = list(operation = "x", outcome = "intent"),
@@ -299,8 +295,7 @@ cond <- tryCatch(
         outcome = function(r) list(outcome = "ok"),
         on_error = function(e, cid) list(outcome = "timeout",
                                          effect_issued = TRUE,
-                                         observed = e$observed),
-        id_fn = function() "cid-oe"),
+                                         observed = e$observed)),
     condition = function(c) c)
 expect_inherits(cond, "demo_timeout")             # original class survives
 expect_equal(cond$observed, "activating")         # original data survives
@@ -318,6 +313,39 @@ expect_equal(audit_scope_for("user", root = FALSE), "user")
 expect_true(system_durable_audit_available(root = TRUE))
 expect_false(system_durable_audit_available(root = FALSE))
 expect_true(system_durable_audit_available(root = FALSE, broker = TRUE))
+
+## --- receipt-based lifecycle: open_intent / write_outcome / emit ---
+ls <- memory_audit_sink(id_fn = function() "cid-life", audit_scope = "caller")
+rcpt <- ls$open_intent(list(operation = "demo.op", outcome = "intent"))
+expect_equal(rcpt$correlation_id, "cid-life")
+expect_true(rcpt$persisted)
+expect_equal(rcpt$audit_scope, "caller")
+st <- ls$write_outcome(rcpt, list(operation = "demo.op", outcome = "ok"))
+expect_true(st$persisted)
+lrecs <- ls$records()
+expect_equal(length(lrecs), 2L)
+expect_equal(lrecs[[1]]$phase, "intent")
+expect_equal(lrecs[[2]]$phase, "outcome")
+expect_equal(lrecs[[1]]$correlation_id, "cid-life")
+expect_equal(lrecs[[2]]$correlation_id, "cid-life")  # outcome bound to receipt
+
+## emit mints a fresh id for a single non-effect record
+es <- memory_audit_sink()
+r1 <- es$emit(list(operation = "p", outcome = "preview"), "preview")
+expect_equal(es$records()[[1]]$phase, "preview")
+expect_false(is.null(r1$correlation_id))
+
+## the file sink implements the same interface
+fp <- file.path(td, "lifecycle.jsonl")
+fsk <- file_audit_sink(fp, durability = "none", audit_scope = "caller",
+                       id_fn = function() "cid-file")
+fr <- fsk$open_intent(list(operation = "op", outcome = "intent"))
+expect_equal(fr$correlation_id, "cid-file")
+expect_equal(fr$audit_scope, "caller")
+fsk$write_outcome(fr, list(operation = "op", outcome = "ok"))
+fl <- readLines(fp, warn = FALSE)
+expect_equal(length(fl), 2L)
+expect_true(all(grepl("cid-file", fl)))
 
 ## unprivileged system-scope -> caller-owned sink, honest about durability
 xdg <- file.path(td, "xdg")
