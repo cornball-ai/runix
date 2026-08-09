@@ -98,10 +98,12 @@ weaker guarantee is explicitly accepted and advertised as such (its own
     must not be able to monopolize the broker by holding a connection open. The
     broker enforces an **absolute** receive deadline for a whole request frame
     (a monotonic wall-clock budget, *not* a per-byte timeout that a dripped
-    byte can reset), a bounded response-write deadline, a cap on simultaneous
-    and pending connections, and per-uid connection-attempt limiting. A
-    connection that misses a deadline is closed and does not block others. This
-    is what makes the serialized single-process loop (below) safe.
+    byte can reset), a bounded response-write deadline, a global and **per-uid**
+    cap on concurrent connections (so one uid cannot occupy every slot), a
+    bounded listen backlog, and per-uid connection-attempt limiting. Connections
+    are multiplexed by a non-blocking `poll(2)` reactor, so a connection that
+    misses a deadline is closed without ever delaying another. This is what makes
+    the single-process event loop (below) safe.
 
 ## Record lifecycle through the broker
 
@@ -198,23 +200,27 @@ implements a spec rather than inventing one.
 
 ## Broker I/O and packaging
 
-- **Single-process, serialized event loop.** v1 handles connections one at a
-  time in a single process. That keeps reconstructed state, the open-intent
-  set, rate accounting, and rotation strictly serialized (no cross-thread
-  locking of the durable state), which is only safe because the deadlines below
-  make monopolization impossible. A slow or hostile client cannot stall the
-  loop past its deadline.
-- **Connection deadlines and limits (anti-slowloris).** The accept loop applies
-  an **absolute monotonic deadline** to receiving each complete request frame,
+- **Single-process, non-blocking multiplexed event loop.** v1 runs one process
+  with a `poll(2)` reactor that multiplexes all connections concurrently; each
+  connection is an independent state machine (receive one request frame, then
+  send one response). The durable state (reconstructed open-intent set, rate
+  accounting, rotation) is still mutated strictly serially — only the network
+  I/O is multiplexed — so there is no cross-thread locking of the durable state.
+  Because no connection can block another, a slow or hostile client cannot stall
+  the loop or delay a client waiting behind it, past its deadline.
+- **Connection deadlines and limits (anti-slowloris).** The loop applies an
+  **absolute monotonic deadline** to receiving each complete request frame,
   computed once when the connection is accepted and enforced across every
   partial read (a client that drips one byte at a time still hits the same
   wall-clock deadline — the budget is never reset by progress). A separate
-  bounded deadline caps the response write. Simultaneous plus pending
-  connections are capped (a bounded listen backlog and an accepted-connection
-  cap), and per-uid connection attempts are rate-limited from broker-assigned
-  timestamps. Deadlines are enforced with `poll(2)` against
-  `CLOCK_MONOTONIC`-derived remaining time; a missed deadline closes just that
-  connection.
+  bounded deadline caps the response write. Concurrent accepted connections are
+  capped both globally and **per-uid** (so one uid cannot fill every slot and
+  starve others), pending connections are bounded by the listen backlog, and
+  per-uid connection attempts are rate-limited from broker-assigned timestamps.
+  Each connection buffers at most one request body (<= the 64 KiB frame maximum)
+  and one response, so memory is bounded by the connection cap. Deadlines are
+  enforced with `poll(2)` against `CLOCK_MONOTONIC`-derived remaining time; a
+  missed deadline closes just that connection.
 - **Descriptor-based, hijack-safe writes.** Open the sink once with
   `O_APPEND | O_NOFOLLOW | O_CLOEXEC` and hold the descriptor; never reopen by
   path per write. `O_NOFOLLOW` refuses a symlinked sink at open; `O_APPEND`
@@ -445,6 +451,10 @@ Record shape and the sink-extension:
 35. **Retention path safety** — only broker-owned regular segment files are
     pruned; an archive-named symlink is neither followed nor deleted and its
     target is untouched.
+36. **Fair multiplexing** — while one uid holds several slow (incomplete-frame)
+    connections, a second client's complete request is served within its
+    deadline, not queued behind the slow connections' deadlines; and a
+    connection beyond the per-uid concurrency cap is dropped.
 
 ## Packaging and activation gate (CI)
 
