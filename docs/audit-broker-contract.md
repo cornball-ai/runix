@@ -258,10 +258,11 @@ safe.
   the `binding`, and `broker.accepted_time_us` (string). An open intent is one
   whose correlation id has an intent record (or a `broker_checkpoint`) but no
   outcome record.
-- **Startup reconstruction:** scan the current segment (and its retained tail)
-  to rebuild the open-intent set and the per-actor rate state. Rate windows
-  are rebuilt from **broker-assigned** record timestamps, never caller-
-  supplied times.
+- **Startup reconstruction:** read **only the current segment** (archives are
+  never read) to rebuild the open-intent set and the per-actor rate state. Rate
+  windows are rebuilt from **broker-assigned** record timestamps, never caller-
+  supplied times. Reading only the current segment is precisely what obliges
+  rotation to carry both open intents and rate history forward (below).
 - **Reconstruction fails closed.** Reject and refuse to serve on: an outcome
   with no matching intent, a second outcome for an already-closed intent, or
   inconsistent duplicate intents. A torn final line (partial-tail from a crash
@@ -288,14 +289,36 @@ safe.
     loses an open intent;
   - the rotation swap holds the sink's advisory lock, and a post-rename fsync
     failure poisons the broker (the rename may not be durable).
-- **Rate state survives rotation.** Because reconstruction reads only the
-  current segment, the recent per-uid rate history is carried into the new
-  segment (as broker checkpoint state), so idle-exit + rotation + reconnect
-  cannot reset a caller's rate window.
-- **Archive retention.** Retired segments are bounded by a retention policy
-  (count and/or total bytes); an open intent is always checkpointed forward
-  before its originating segment can be pruned, so retention never drops a
-  still-open operation.
+- **Rate state survives rotation.** Rotation writes one `broker_rate` record
+  per active uid into the new segment: the broker-assigned timestamps still
+  inside the rate window (only those). Reconstruction reseeds the per-uid ring
+  from it, so idle-exit + rotation + restart cannot reset a caller's rate
+  window. The window boundary is **inclusive**: a timestamp exactly
+  `now - window` old still counts against the limit (and is still carried); one
+  microsecond older does not.
+- **Archive retention.** Retired segments are bounded by **both** a segment
+  count and a total byte budget, and the active segment counts toward the byte
+  budget. Oldest archives are pruned first, and **only after** the new
+  checkpointed segment is durably swapped in, so an archive is never deleted
+  while an open intent's checkpoint is not yet durable. Because carry-forward
+  re-materialises every open intent as a checkpoint in the retained active
+  segment, retention can never drop a still-open operation.
+  - **Config floor.** A byte budget smaller than one segment can never be met by
+    pruning archives, so `retain_bytes` below `rotate_bytes` is rejected at
+    startup (fail closed) rather than run as an unsatisfiable bound.
+  - **Active segment is never sacrificed.** If the active segment alone exceeds
+    the byte budget (e.g. a large open-intent checkpoint set), retention prunes
+    every archive and the active segment stands; audit is never destroyed to
+    satisfy a bound.
+  - **Only broker-owned regular files.** A prune candidate must be a regular
+    file, owned by the broker, whose name is the sink base plus an all-decimal
+    rotation suffix. Symlinks are never followed and never counted, so retention
+    can never delete an unexpected path.
+  - **Deletion durability.** Pruning is followed by a parent-directory fsync;
+    its failure is non-fatal and does **not** poison the broker. A resurrected
+    archive is harmless (reconstruction never reads archives) and is re-pruned at
+    the next rotation — unlike the rotation rename, whose loss would drop an
+    acknowledged write.
 
 ## Relationship to the rest
 
@@ -409,6 +432,19 @@ Record shape and the sink-extension:
     R file sink and through the broker agrees field-for-field on the canonical
     schema (reals compared with tolerance; the broker's `broker` extension is
     broker-only).
+33. **Rotation preserves state across restart** — with a small `rotate_bytes`
+    that forces the rate-seeding audit records into archives, a restart still
+    finds every open intent (via checkpoints) **and** the per-uid rate limit
+    still holds (via `broker_rate`). The rate-window boundary is inclusive: an
+    op at exactly `now - window` counts, one microsecond older does not.
+34. **Retention bounds, active included** — retention holds the on-disk total
+    within both the segment count and the byte budget (the active segment
+    counted); `retain_bytes < rotate_bytes` is rejected at startup; and when the
+    active segment alone exceeds the budget, every archive is pruned while the
+    unresolved intents survive and stay closable.
+35. **Retention path safety** — only broker-owned regular segment files are
+    pruned; an archive-named symlink is neither followed nor deleted and its
+    target is untouched.
 
 ## Packaging and activation gate (CI)
 
