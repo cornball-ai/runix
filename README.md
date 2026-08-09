@@ -7,6 +7,44 @@ interfaces Ubuntu already uses (apt, systemd, D-Bus, udev, polkit), plus an
 **Status: experimental, pre-0.1 everywhere.** APIs change without
 deprecation until the packages reach 0.1.0.
 
+## Why Runix
+
+Linux keeps moving its systems-critical tooling out of Python and into
+compiled languages: netplan's core now lives in a C library (libnetplan), and
+systemd, apt, and dpkg are C/C++. So we asked a question. What if we replaced
+the sysadmin Python that Ubuntu ships with R, and made the result more
+ergonomic for agents to reason over at the same time?
+
+**Runix turns native Linux administration into typed data and governed
+operations, so package, service, and log state can be joined, reasoned about,
+and safely acted on across a fleet.**
+
+Honest limit: for a single host with a human at a terminal, native tools
+(`apt`, `systemctl`, `journalctl`) are simpler, and Runix has to justify its
+complexity. Its value shows up in multi-host, agent-driven workflows, through
+stable schemas, typed retryable errors, previews, verified post-state, and
+durable audit. R itself doesn't make anything safer; the explicit boundary and
+verification discipline do.
+
+The control path stays Python-independent. Native mechanisms stay native; R
+does data, policy, orchestration, and a stable interface:
+
+| Surface | Current path | Intended direction | Python on the Runix path |
+|---|---|---|---|
+| Package reads | `dpkg-query`, `apt-cache` | libapt / RcppAPT-style backend | none |
+| systemd and journal | `systemctl`, `journalctl` | sd-bus / sd-journal | none |
+| Netplan / NetworkManager | not yet shipped | libnetplan C ABI / NetworkManager D-Bus | none |
+| Audit | native C broker | native C broker | none |
+
+Two qualifications:
+
+- This means Runix does not invoke or depend on system Python for those paths.
+  It does not mean Python disappears from the host: GNOME Terminal,
+  software-properties, release tooling, and cloud-init can still use it.
+- A Runix operation can still manage a Python service, and an apt transaction
+  can still run arbitrary maintainer scripts. The control path is
+  Python-independent; the managed workload need not be.
+
 This repository is both the **`runix` common-core package** (zero-dependency
 shared spine: typed conditions, retryability registry, injectable-runner
 machinery, neutral result object) and the project umbrella (architecture
