@@ -115,13 +115,14 @@ fields:
 ```jsonc
 {
   "schema_version": 1,
+  "record_type": "audit",
   "correlation_id": "<time-ordered unique token, stable across the pair>",
   "phase": "intent" | "outcome",
   "host": "<nodename>",
   "pid": 12345,
   "operation": "systemd.restart",
   "resource": "cups.service",
-  "actor": "<uid/name of caller>",
+  "actor": "uid:1000",
   "scope": "system" | "user",
   "preview": false,
   "authorized_via": "polkit:org.freedesktop.systemd1.manage-units",
@@ -141,6 +142,67 @@ The `runix_result` audit sublist and the mutation error condition gain the
 same `correlation_id`, `effect_issued`, and `audit_persisted` fields, so the
 in-memory result, the raised condition, and the on-disk line all cross-
 reference. This is the amendment to the Phase 2 audit record.
+
+**`record_type`.** Every line carries `record_type`; `"audit"` is a
+user-visible mutation event with the fields above. It is a closed set: readers
+switch on it and MUST skip a `record_type` they do not recognize (e.g. a
+broker-internal `"broker_checkpoint"`, below) rather than treat it as an audit
+event. A missing `record_type` is read as `"audit"` for backward compatibility.
+
+**`actor` is a normalized `uid:<numeric uid>` string across every sink.** The
+numeric peer identity is authoritative; a display name is not part of the
+canonical value (name resolution is unstable and sink-dependent). This
+supersedes the earlier `name(uid)` form — a pre-release normalization so all
+sinks (local file, memory, broker) emit the identical actor representation.
+
+## Sink-extension records (the `broker` object and `broker_checkpoint`)
+
+A sink that maintains durable state of its own (the audit broker,
+`audit-broker-contract.md`) records that state **in the same JSONL file** — one
+physical source of truth — through a single, versioned, explicitly-defined
+extension. It is not an open-ended grab-bag: strict readers accept exactly this
+shape and still reject unrelated unknown fields.
+
+- **The `broker` object** may appear on an `"audit"` record written by the
+  broker:
+
+  ```jsonc
+  "broker": {
+    "schema_version": 1,
+    "peer": { "uid": 1000, "gid": 1000, "pid": 123,
+              "boot_id": "<host boot id>", "starttime": "<proc start ticks>" },
+    "binding": "<opaque receipt token>",   // intent only; omitted on outcomes
+    "accepted_time_us": "1786238615572863" // string, not an integer
+  }
+  ```
+
+  `broker.peer` is the full kernel-verified identity (the load-bearing actor for
+  matching an outcome to its intent); the top-level `pid` is the same peer PID
+  in canonical position. `broker.binding` is **sensitive**: it appears only
+  where an outcome may still be written (intent + checkpoint records), and every
+  forwarding/export view MUST strip it. `broker.accepted_time_us` is a **string**
+  (microseconds since the epoch, broker-assigned) used only for reconstruction
+  and rate windows; the canonical human timestamp remains `time` (RFC 3339 UTC).
+
+- **`broker_checkpoint`** is a broker-internal `record_type` (not an audit
+  `phase`), written during rotation to carry a still-open intent forward into
+  the current segment so reconstruction never has to read retired archives:
+
+  ```jsonc
+  { "record_type": "broker_checkpoint",
+    "correlation_id": "...",
+    "broker": { "schema_version": 1, "peer": {…}, "binding": "…",
+                "accepted_time_us": "…",
+                "operation": "systemd.restart", "resource": "cups.service",
+                "scope": "system" } }
+  ```
+
+  A checkpoint retains the original intent's `operation`/`resource`/`scope` (plus
+  binding and peer identity) so an open intent stays meaningful even after the
+  segment that first recorded it is archived and retention-pruned. Audit readers
+  skip `broker_checkpoint` lines; broker reconstruction consumes them
+  idempotently (a repeated checkpoint for the same `correlation_id` collapses to
+  one open intent).
 
 ## Correlation IDs
 

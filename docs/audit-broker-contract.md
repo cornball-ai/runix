@@ -150,17 +150,30 @@ implements a spec rather than inventing one.
   unsupported client rather than guess.
 - **Body: strict UTF-8 JSON**, parsed by **Jansson** (the system,
   apt-serviced library) with `JSON_REJECT_DUPLICATES` (native duplicate-key
-  rejection), strict EOF (reject trailing content), `JSON_VALIDATE_UTF8`, and
-  a bounded parse depth. **No hand-written parser** (the parser is the largest
+  rejection) and strict EOF (reject trailing content; Jansson validates UTF-8
+  inherently — there is no `JSON_VALIDATE_UTF8` load flag), plus the protocol's
+  tighter parse depth enforced in schema validation. **No hand-written parser**
+  (the parser is the largest
   attack surface; do not build one). Jansson is chosen over json-c
   specifically because json-c 0.17 cannot reject duplicate keys (it silently
   keeps last-wins); both are apt-serviced from Ubuntu main, so the supply-chain
   posture is unchanged. yyjson would require vendoring (no system package) and
   a janssonr R package was rejected: the C broker and the R stack interoperate
   through this wire schema, not a shared library.
-- **Two request types only:** `open_intent` and `write_outcome`. Any other
-  type is a typed `unknown_request` error. There is no general command
-  channel.
+- **Three request types:** `open_intent`, `write_outcome`, and `emit`. Any
+  other type is a typed `unknown_request` error; there is no general command
+  channel. `emit` writes a **single** standalone record (a preview or a
+  pre-effect no-op) with a broker-minted `correlation_id` and no binding — it is
+  the non-effect path the runix sink interface exposes as `emit()`
+  (`durable-audit-contract.md`), which the R adapter must implement alongside
+  `open_intent`/`write_outcome`. An `emit` record is closed on arrival: it opens
+  no intent and can never be paired with an outcome.
+- **Persisted record shape.** Records match the shared cross-sink schema
+  (`durable-audit-contract.md`): canonical fields in insertion order plus the
+  versioned `broker` extension object (`schema_version`, `peer`, `binding` on
+  intents only, string `accepted_time_us`). `actor` is the normalized
+  `uid:<numeric uid>`; the top-level `pid` is the peer PID; `time` is RFC 3339.
+  Carry-forward is a `broker_checkpoint` `record_type`, never an audit `phase`.
 - **`SO_PEERCRED` overrides all payload identity.** The full actor identity
   (uid/gid/pid + boot id + process start time) comes from the kernel-verified
   peer credentials; any identity field in the body is ignored and
@@ -240,9 +253,11 @@ is a cache rebuilt from it. This is what makes socket activation and restart
 safe.
 
 - **Persisted per intent:** the broker-written intent record carries the
-  correlation id, the **full peer identity** (uid/gid/pid + boot id + process
-  start time), and the binding. An open intent is one whose correlation id has
-  an intent record but no outcome record.
+  canonical audit fields plus the versioned `broker` extension — the **full
+  peer identity** (`broker.peer`: uid/gid/pid + boot id + process start time),
+  the `binding`, and `broker.accepted_time_us` (string). An open intent is one
+  whose correlation id has an intent record (or a `broker_checkpoint`) but no
+  outcome record.
 - **Startup reconstruction:** scan the current segment (and its retained tail)
   to rebuild the open-intent set and the per-actor rate state. Rate windows
   are rebuilt from **broker-assigned** record timestamps, never caller-
@@ -250,21 +265,37 @@ safe.
 - **Reconstruction fails closed.** Reject and refuse to serve on: an outcome
   with no matching intent, a second outcome for an already-closed intent, or
   inconsistent duplicate intents. A torn final line (partial-tail from a crash
-  mid-append) is recovered by discarding exactly that trailing partial record;
-  any other unexplained corruption is fatal, not silently skipped.
+  mid-append) is recovered by **truncating the sink on disk** to the last
+  durable newline (and fsync) before serving, so the next append cannot
+  concatenate onto partial bytes; any other unexplained corruption is fatal, not
+  silently skipped. Any partial append or post-rename fsync uncertainty
+  **poisons** the broker (it refuses further writes until a restart repairs the
+  sink) rather than compounding corruption.
 - **Rotation is carry-forward, never refusal.** Refusing to rotate while an
   intent is open would be a trivial disk-exhaustion attack (hold one intent
   open forever, block rotation). Instead, open intents are **checkpointed**
   into the new segment:
   - open intents are bounded **per-uid and globally**; opening beyond the cap
     is a typed `rate_limited`/`too_many` error, not unbounded growth;
-  - a carry-forward record is an explicit checkpoint (a distinct `phase`), not
-    an ambiguous second `intent`, and duplicate carry-forwards are
-    **idempotent** on reconstruction (same correlation id collapses to one
+  - a carry-forward record is a `broker_checkpoint` `record_type` (not an audit
+    `phase`, and not an ambiguous second `intent`) that retains the intent's
+    `operation`/`resource`/`scope`, binding, and peer identity so an open intent
+    stays meaningful after archives are retention-pruned; duplicate checkpoints
+    are **idempotent** on reconstruction (same correlation id collapses to one
     open intent);
   - the new segment is written and its data **and parent directory fsync'd
     before the old segment is retired**, so a crash during rotation never
-    loses an open intent.
+    loses an open intent;
+  - the rotation swap holds the sink's advisory lock, and a post-rename fsync
+    failure poisons the broker (the rename may not be durable).
+- **Rate state survives rotation.** Because reconstruction reads only the
+  current segment, the recent per-uid rate history is carried into the new
+  segment (as broker checkpoint state), so idle-exit + rotation + reconnect
+  cannot reset a caller's rate window.
+- **Archive retention.** Retired segments are bounded by a retention policy
+  (count and/or total bytes); an open intent is always checkpointed forward
+  before its originating segment can be pruned, so retention never drops a
+  still-open operation.
 
 ## Relationship to the rest
 
@@ -276,6 +307,11 @@ safe.
   caller-owned.
 - Entirely separate from the apt mutation boundary; the two privileged paths
   never merge.
+- **R adapter gate.** The broker-backed R sink (build step 3) is not begun
+  until the broker can serve all three sink methods — `emit`, `open_intent`,
+  `write_outcome` — and the adapter is not advertised until it faithfully
+  implements the same three against the live broker (with the cross-library
+  response-schema checks, test 20/21).
 
 ## Conformance tests
 
@@ -354,6 +390,25 @@ Durable-state reconstruction and rotation:
     absolute receive deadline, the deadline is not reset by trickled progress,
     and a second client is served promptly meanwhile. Exhausting the connection
     cap or per-uid attempt limit is rejected, not allowed to stall the loop.
+
+Record shape and the sink-extension:
+
+29. **`emit` single record** — an `emit` request writes one closed record with
+    a broker-minted `correlation_id` and no binding; it opens no intent and can
+    never be paired with an outcome. The three methods (`emit`, `open_intent`,
+    `write_outcome`) all round-trip through a broker-backed sink.
+30. **Binding is stripped on export** — a forwarding/export view of the audit
+    trail contains no `broker.binding`, while reconstruction from the raw sink
+    still recovers it. Asserted explicitly.
+31. **`record_type` discipline** — an audit record carries the versioned
+    `broker` extension with the exact defined shape (unrelated unknown fields
+    rejected); a `broker_checkpoint` line is skipped by an audit reader and
+    consumed by reconstruction, and it retains the intent's
+    operation/resource/scope so an open intent survives archive pruning.
+32. **Cross-sink record equality** — the same logical record built through the
+    R file sink and through the broker agrees field-for-field on the canonical
+    schema (reals compared with tolerance; the broker's `broker` extension is
+    broker-only).
 
 ## Packaging and activation gate (CI)
 
