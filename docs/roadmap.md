@@ -255,6 +255,42 @@ post-state instead of trusting exit codes; consistent preview/authorization/
 retry/cancellation/audit; fleet-wide joins and policy in R; and resumable
 operation identities with partial-failure handling.
 
+## Canary environment: troy-g5
+
+Runix and Viento get validated on **troy-g5** (a GPU host also running Viento
+and GPU workloads), not on the primary workstation. GPU hosts are unusually
+sensitive to kernel, NVIDIA, initramfs, and networking changes, so the canary
+runs at two levels:
+
+1. **A disposable VM on troy-g5** for destructive testing: `.deb` install,
+   socket activation, sandbox directives, broker restarts, malformed clients,
+   and eventually apt mutations. Containers are fine for builds/fuzzing but do
+   not faithfully reproduce host systemd, D-Bus, polkit, or peer credentials,
+   so the destructive gates need a real VM, not a container.
+2. **The troy-g5 host itself** for realistic integration: synthetic
+   user/system units, broker operation, `rctl` envelopes, and Viento
+   orchestration. **Initially forbidden on the host:** changes to NVIDIA
+   packages/services, kernels, boot configuration, networking, SSH, and
+   container-runtime services.
+
+The node is labelled a **canary** in Viento, with exact host-identity matching,
+an operation allowlist, explicit approval, and before/after audit evidence
+required. The first live workflow to prove end to end:
+
+    Viento -> troy-g5 -> capabilities
+                       -> preview a synthetic unit restart
+                       -> approve
+                       -> execute through rctl
+                       -> verify InvocationID / post-state
+                       -> retrieve the matching intent/outcome audit records
+
+This is where the architecture's value gets demonstrated concretely: Viento
+orchestrates and aggregates; Runix supplies the safe, typed, node-local
+execution boundary. Autonomous fleet mutation stays disabled until this canary
+path — **including recovery from an interrupted operation** — works repeatedly.
+The broker's `.deb`/socket-activation/sandbox gates (which need a real systemd
+service manager, not a CI container) run here.
+
 ## Deferred decisions
 
 - **R version floor** — none declared yet in any package. Decide only if
