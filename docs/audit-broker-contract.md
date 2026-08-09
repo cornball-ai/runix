@@ -94,6 +94,14 @@ weaker guarantee is explicitly accepted and advertised as such (its own
 10. **No mutation authority.** The broker only validates and appends audit
     records. It never runs `systemctl`, `apt`, or any other effect, and holds
     no capability beyond writing its sink.
+11. **Bounded connection time and concurrency.** A single unprivileged caller
+    must not be able to monopolize the broker by holding a connection open. The
+    broker enforces an **absolute** receive deadline for a whole request frame
+    (a monotonic wall-clock budget, *not* a per-byte timeout that a dripped
+    byte can reset), a bounded response-write deadline, a cap on simultaneous
+    and pending connections, and per-uid connection-attempt limiting. A
+    connection that misses a deadline is closed and does not block others. This
+    is what makes the serialized single-process loop (below) safe.
 
 ## Record lifecycle through the broker
 
@@ -177,6 +185,23 @@ implements a spec rather than inventing one.
 
 ## Broker I/O and packaging
 
+- **Single-process, serialized event loop.** v1 handles connections one at a
+  time in a single process. That keeps reconstructed state, the open-intent
+  set, rate accounting, and rotation strictly serialized (no cross-thread
+  locking of the durable state), which is only safe because the deadlines below
+  make monopolization impossible. A slow or hostile client cannot stall the
+  loop past its deadline.
+- **Connection deadlines and limits (anti-slowloris).** The accept loop applies
+  an **absolute monotonic deadline** to receiving each complete request frame,
+  computed once when the connection is accepted and enforced across every
+  partial read (a client that drips one byte at a time still hits the same
+  wall-clock deadline — the budget is never reset by progress). A separate
+  bounded deadline caps the response write. Simultaneous plus pending
+  connections are capped (a bounded listen backlog and an accepted-connection
+  cap), and per-uid connection attempts are rate-limited from broker-assigned
+  timestamps. Deadlines are enforced with `poll(2)` against
+  `CLOCK_MONOTONIC`-derived remaining time; a missed deadline closes just that
+  connection.
 - **Descriptor-based, hijack-safe writes.** Open the sink once with
   `O_APPEND | O_NOFOLLOW | O_CLOEXEC` and hold the descriptor; never reopen by
   path per write. `O_NOFOLLOW` refuses a symlinked sink at open; `O_APPEND`
@@ -197,6 +222,15 @@ implements a spec rather than inventing one.
   service configuration; a **test-path override is process configuration**
   (env/CLI/config to the broker process), **never a protocol input** — a
   client can never tell the broker where to write.
+- **Packaging is a mandatory, non-skipping gate.** Building the `.deb`,
+  installing it, and exercising **real socket activation** (systemd starts the
+  service on the first connection) and the **sandbox directives** must run and
+  pass in CI — not be conditionally skipped to keep the pipeline green. CI must
+  first prove systemd is actually the service manager
+  (`systemctl is-system-running` / `sd_booted`), and a step whose prerequisite
+  is absent must **fail or run in a systemd-capable VM/container**, never
+  silently no-op. A green pipeline that skipped activation is treated as a
+  failed gate.
 
 ## Durable state, reconstruction, and rotation
 
@@ -315,3 +349,23 @@ Durable-state reconstruction and rotation:
 27. **Rate limits survive restart** — counters rebuilt from broker-assigned
     timestamps are not reset by a restart, so idle-exit + reconnect does not
     bypass the limit.
+28. **Slowloris / connection monopolization** — a client that connects and
+    drips a frame one byte at a time (or opens and never sends) is closed at the
+    absolute receive deadline, the deadline is not reset by trickled progress,
+    and a second client is served promptly meanwhile. Exhausting the connection
+    cap or per-uid attempt limit is rejected, not allowed to stall the loop.
+
+## Packaging and activation gate (CI)
+
+The `.deb` build, install, socket-activation, and sandbox checks are a
+**mandatory** part of the pipeline, not optional steps guarded behind
+`hashFiles`/`if` skips that pass by doing nothing. The job must:
+
+- prove systemd is the running service manager before the activation test
+  (`systemctl is-system-running` returning a live state, or `sd_booted()`);
+- install the built `.deb`, then trigger the socket and assert the service
+  activates on first connect and writes to the fixed sink;
+- assert the sandbox directives took effect (e.g. the service cannot write
+  outside its `ReadWritePaths`, `CapabilityBoundingSet` is empty);
+- if the runner cannot provide systemd, run this leg in a systemd-capable
+  container/VM or **fail** — never skip to green.
