@@ -281,6 +281,7 @@ rec <- me$records()[[1]]
 expect_equal(rec$phase, "preview")
 expect_equal(rec$correlation_id, "cid-1")
 expect_equal(rec$schema_version, 1L)
+expect_equal(rec$record_type, "audit")
 expect_false(is.null(rec$host))
 expect_false(is.null(rec$pid))
 expect_false(is.null(rec$time))

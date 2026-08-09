@@ -1,8 +1,8 @@
 Package: runix
 Type: Package
 Title: Common Core for the Runix System-Administration Framework
-Version: 0.0.1.4
-Date: 2026-08-08
+Version: 0.0.1.5
+Date: 2026-08-09
 Authors@R: c(
     person("Troy", "Hernandez", role = c("aut", "cre"), email = "troy@cornball.ai",
            comment = c(ORCID = "0009-0005-4248-604X")),

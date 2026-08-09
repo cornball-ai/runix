@@ -62,8 +62,11 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 }
 
 ## Merge the framing fields onto a domain record in deterministic key order.
+## `record_type` distinguishes a user-visible audit event from a sink's internal
+## records (e.g. the broker's checkpoints); see durable-audit-contract.md.
 .finish_record <- function(rec, cid, phase, time) {
-    c(list(schema_version = 1L, correlation_id = cid, phase = phase,
+    c(list(schema_version = 1L, record_type = "audit",
+            correlation_id = cid, phase = phase,
             host = .nodename(), pid = Sys.getpid()),
         rec,
         list(time = time))
@@ -71,8 +74,9 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 
 #' Emit a single framed audit record
 #'
-#' Frames a domain record (adds \code{schema_version}, \code{correlation_id},
-#' \code{phase}, \code{host}, \code{pid}, \code{time}) and writes it once. The
+#' Frames a domain record (adds \code{schema_version}, \code{record_type},
+#' \code{correlation_id}, \code{phase}, \code{host}, \code{pid}, \code{time})
+#' and writes it once. The
 #' primitive behind \code{\link{audit_two_phase}}, and the right tool for a
 #' non-effect path (a preview or a pre-effect no-op) that the contract records
 #' with a single record rather than an intent/outcome pair.

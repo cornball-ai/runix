@@ -21,8 +21,9 @@ A receipt: \code{list(correlation_id, persisted, audit_scope,
   binding, error)}.
 }
 \description{
-Frames a domain record (adds \code{schema_version}, \code{correlation_id},
-\code{phase}, \code{host}, \code{pid}, \code{time}) and writes it once. The
+Frames a domain record (adds \code{schema_version}, \code{record_type},
+\code{correlation_id}, \code{phase}, \code{host}, \code{pid}, \code{time})
+and writes it once. The
 primitive behind \code{\link{audit_two_phase}}, and the right tool for a
 non-effect path (a preview or a pre-effect no-op) that the contract records
 with a single record rather than an intent/outcome pair.
