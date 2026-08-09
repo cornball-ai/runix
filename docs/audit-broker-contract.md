@@ -55,18 +55,25 @@ weaker guarantee is explicitly accepted and advertised as such (its own
 2. **Fixed, broker-owned sink path.** The broker writes only its configured
    system sink; a caller-supplied destination path is rejected. The caller
    never chooses where root writes.
-3. **`SO_PEERCRED` identity, never payload identity.** The actor (uid/gid/pid)
-   comes from the connected peer's kernel-verified credentials; any actor
-   field in the payload is ignored and overwritten. A caller cannot claim to
-   be someone else.
+3. **`SO_PEERCRED` identity, never payload identity.** The actor comes from
+   the connected peer's kernel-verified credentials; any actor field in the
+   payload is ignored and overwritten. The **full** identity is persisted and
+   matched, not UID alone: `uid`, `gid`, `pid`, plus the boot id and the
+   peer's process start time, so a reused PID (or a post-reboot PID
+   collision) cannot impersonate the original opener. Weakening this to
+   UID-only would require an explicit contract + threat-model amendment; it is
+   not a silent default.
 4. **Broker-minted correlation IDs for intents.** The broker mints the
    `correlation_id` when it accepts an intent and returns it to the caller; a
    caller cannot forge, choose, or collide IDs. The caller uses the returned
    id for its outcome and its result.
 5. **Outcome writes bound to the original actor and intent.** An outcome for
-   id X is accepted only from the same `SO_PEERCRED` actor that opened intent
-   X, and only for an intent the broker actually recorded. No one can close or
-   fabricate another principal's operation.
+   id X is accepted only from a peer whose **full** identity (uid/gid/pid +
+   boot id + process start time) matches the one that opened intent X, and
+   only for an intent the broker actually recorded and that is still open. No
+   one can close or fabricate another principal's operation, and a leaked
+   binding is useless to any other peer because the kernel-verified identity
+   must still match.
 6. **Strict framing, schema, and size validation.** Requests are explicitly
    framed (length-prefixed); each record is validated against the durable-audit
    schema and a size cap before any write. Malformed or oversize requests are
@@ -146,15 +153,18 @@ implements a spec rather than inventing one.
 - **Two request types only:** `open_intent` and `write_outcome`. Any other
   type is a typed `unknown_request` error. There is no general command
   channel.
-- **`SO_PEERCRED` overrides all payload identity.** The actor (uid/gid/pid)
-  comes from the kernel-verified peer credentials; any identity field in the
-  body is ignored and overwritten. A client cannot claim to be another
-  principal.
-- **The receipt `binding` is opaque and authorizes nothing.** It only lets the
-  broker match a `write_outcome` to its `open_intent` (and confirm the same
-  actor). It is not a capability: it cannot authorize a mutation, a different
-  intent, or any other action, and it is meaningless to the client beyond
-  echoing it back.
+- **`SO_PEERCRED` overrides all payload identity.** The full actor identity
+  (uid/gid/pid + boot id + process start time) comes from the kernel-verified
+  peer credentials; any identity field in the body is ignored and
+  overwritten. A client cannot claim to be another principal.
+- **The receipt `binding` authorizes exactly one narrowly-scoped action:**
+  appending the outcome for *its own* intent, and only from a peer whose full
+  identity matches the opener. It cannot authorize a mutation, a different
+  intent, or any other broker operation, and possession alone is insufficient
+  (the peer-identity check is load-bearing). It is **sensitive**: the broker
+  stores it raw only because the sink is root-privileged and actor-matching
+  is the real gate; it is marked sensitive and excluded from any
+  forwarding/export view of the audit trail.
 - **Deterministic responses, typed protocol errors.** Each request yields
   exactly one framed response of a fixed shape. Errors are a closed, typed
   set (e.g. `bad_frame`, `too_large`, `bad_json`, `unknown_request`,
@@ -187,6 +197,40 @@ implements a spec rather than inventing one.
   service configuration; a **test-path override is process configuration**
   (env/CLI/config to the broker process), **never a protocol input** — a
   client can never tell the broker where to write.
+
+## Durable state, reconstruction, and rotation
+
+The broker holds **no authoritative in-memory state**: the sink is the single
+source of truth, and any in-memory map (open intents, per-actor rate counters)
+is a cache rebuilt from it. This is what makes socket activation and restart
+safe.
+
+- **Persisted per intent:** the broker-written intent record carries the
+  correlation id, the **full peer identity** (uid/gid/pid + boot id + process
+  start time), and the binding. An open intent is one whose correlation id has
+  an intent record but no outcome record.
+- **Startup reconstruction:** scan the current segment (and its retained tail)
+  to rebuild the open-intent set and the per-actor rate state. Rate windows
+  are rebuilt from **broker-assigned** record timestamps, never caller-
+  supplied times.
+- **Reconstruction fails closed.** Reject and refuse to serve on: an outcome
+  with no matching intent, a second outcome for an already-closed intent, or
+  inconsistent duplicate intents. A torn final line (partial-tail from a crash
+  mid-append) is recovered by discarding exactly that trailing partial record;
+  any other unexplained corruption is fatal, not silently skipped.
+- **Rotation is carry-forward, never refusal.** Refusing to rotate while an
+  intent is open would be a trivial disk-exhaustion attack (hold one intent
+  open forever, block rotation). Instead, open intents are **checkpointed**
+  into the new segment:
+  - open intents are bounded **per-uid and globally**; opening beyond the cap
+    is a typed `rate_limited`/`too_many` error, not unbounded growth;
+  - a carry-forward record is an explicit checkpoint (a distinct `phase`), not
+    an ambiguous second `intent`, and duplicate carry-forwards are
+    **idempotent** on reconstruction (same correlation id collapses to one
+    open intent);
+  - the new segment is written and its data **and parent directory fsync'd
+    before the old segment is retired**, so a crash during rotation never
+    loses an open intent.
 
 ## Relationship to the rest
 
@@ -250,3 +294,24 @@ Protocol and abuse tests (a lying or hostile client):
     frames, edge-case records) produce identical accept/reject decisions
     through the jansson broker and the yyjsonr adapter; the two independent
     parsers agree on the wire schema.
+
+Durable-state reconstruction and rotation:
+
+22. **Reconstruction fails closed** — a sink containing an outcome with no
+    matching intent, a double outcome, or an inconsistent duplicate intent is
+    rejected at startup, not silently served.
+23. **Partial-tail recovery** — a torn final line (crash mid-append) is
+    discarded and every earlier record remains intact and usable; any other
+    corruption is fatal.
+24. **Carry-forward idempotency** — rotation with an open intent checkpoints
+    it into the new segment; reconstruction collapses duplicate carry-forwards
+    to a single open intent, which is still closable afterward.
+25. **Bounded open intents** — opening beyond the per-uid or global cap is
+    rejected (`too_many`/`rate_limited`); rotation is never refused, so an
+    open intent cannot be used to exhaust disk.
+26. **Full-identity match** — an outcome from the same uid but a different pid
+    or process start time (PID reuse) is rejected (`actor_mismatch`), not
+    accepted as the original opener.
+27. **Rate limits survive restart** — counters rebuilt from broker-assigned
+    timestamps are not reset by a restart, so idle-exit + reconnect does not
+    bypass the limit.
