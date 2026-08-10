@@ -1,1 +1,3 @@
 deploy/dist/
+src/*.o
+src/*.so

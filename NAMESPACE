@@ -17,3 +17,5 @@ export(sys_clock)
 export(system_durable_audit_available)
 
 S3method(print,runix_result)
+
+useDynLib(runix, .registration = TRUE, .fixes = "C_")
