@@ -83,8 +83,10 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 #'
 #' @param sink An audit sink (see \code{\link{file_audit_sink}}).
 #' @param record A named list: the record's domain content.
-#' @param phase Record phase, e.g. \code{"intent"}, \code{"outcome"},
-#'   \code{"preview"}, \code{"noop"}.
+#' @param phase Record phase, e.g. \code{"preview"} or \code{"noop"}. Required:
+#'   a single-record emit must name what it records. A broker sink accepts only
+#'   the non-effect phases \code{"preview"}/\code{"noop"}; local sinks also
+#'   accept other phases for their own record-keeping.
 #' @param correlation_id Optional operation id; default lets the sink mint one
 #'   (the broker mints server-side; local sinks use their \code{id_fn}).
 #' @return A receipt: \code{list(correlation_id, persisted, audit_scope,
@@ -94,8 +96,8 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 #' audit_emit(s, list(operation = "demo.op", effect_issued = FALSE,
 #'     outcome = "preview"), phase = "preview")$persisted
 #' @export
-audit_emit <- function(sink, record, phase = "outcome", correlation_id = NULL) {
-    stopifnot(is.list(record))
+audit_emit <- function(sink, record, phase, correlation_id = NULL) {
+    stopifnot(is.list(record), is.character(phase), length(phase) == 1L)
     if (is.null(correlation_id)) {
         sink$emit(record, phase)
     } else {

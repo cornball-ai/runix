@@ -7,8 +7,7 @@ broker_audit_sink(
   socket_path = "/run/runix/audit-broker.sock",
   connect_ms = 2000L,
   recv_ms = 5000L,
-  send_ms = 5000L,
-  audit_scope = "system"
+  send_ms = 5000L
 )
 }
 \arguments{
@@ -20,8 +19,6 @@ configuration; a client never chooses where root writes).}
 \item{recv_ms}{Millisecond deadline for reading the response.}
 
 \item{send_ms}{Millisecond deadline for writing the request.}
-
-\item{audit_scope}{The scope stamped on receipts (\code{"system"}).}
 }
 \value{
 A sink implementing \code{open_intent}, \code{write_outcome},
@@ -35,13 +32,19 @@ unprivileged mutation can obtain a record it could not write to the
 root-owned system sink itself. It implements the same receipt lifecycle as
 \code{\link{file_audit_sink}} (\code{open_intent}/\code{write_outcome}/
 \code{emit}), but the broker mints correlation ids server-side and returns an
-opaque \code{binding} carried only in the in-memory receipt.
+opaque \code{binding} carried only in the in-memory receipt. \code{emit}
+accepts only the non-effect phases \code{"preview"}/\code{"noop"} (enforced
+locally as well as by the broker).
 }
 \details{
-Fail-closed throughout: a missing socket, timeout, malformed response, or any
-broker error yields \code{persisted = FALSE} with a typed error code and
-never falls back to a caller-owned sink. On Windows and other non-Linux
-platforms the transport is unavailable and every call returns
+The client authenticates the server: before any request byte is sent, the
+peer's kernel-verified uid (\code{SO_PEERCRED}) must be root, so a malicious
+local socket cannot impersonate the broker and fake a persisted response.
+Fail-closed throughout: a missing socket, an untrusted peer, a timeout, a
+malformed response, or any broker error yields \code{persisted = FALSE} with
+a typed error code and never falls back to a caller-owned sink; a failed
+receipt claims no \code{audit_scope}. The broker is Linux-only: on Windows,
+macOS, and other platforms every call returns
 \code{runix_broker_unavailable}.
 
 }

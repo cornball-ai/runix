@@ -1,24 +1,39 @@
 /*
  * AF_UNIX client transport for the runix audit broker (audit-broker-contract.md,
  * PROTOCOL.md). Base R's socketConnection() cannot speak AF_UNIX, so this is a
- * small, self-contained client: connect, send one length-framed request, read
- * one length-framed response, with absolute deadlines on connect/send/recv.
+ * small, self-contained client: connect, authenticate the SERVER peer via
+ * SO_PEERCRED, send one length-framed request, read one length-framed response,
+ * with absolute deadlines on connect/send/recv.
  *
- * It performs NO schema work: it enforces only the raw frame (version byte,
- * uint32 big-endian length, hard 64 KiB cap, complete read) and hands the body
- * bytes to the R layer, which does strict yyjsonr validation. Every failure is
- * reported as a typed status so the R sink can fail closed.
+ * Server-peer authentication: a local socket path is spoofable by any local
+ * process, and a malicious listener could return a valid-looking `open_ok`,
+ * making Runix issue a mutation under a false belief that system audit
+ * persisted. So immediately after connect -- before a single request byte is
+ * sent -- the peer's kernel-verified uid (SO_PEERCRED) must equal the expected
+ * uid (root in production; the R layer pins it and only an internal test seam
+ * can inject another value). A mismatch is a typed refusal.
  *
- * Platform guard: the real client compiles only where AF_UNIX is available
- * (POSIX). On Windows / unsupported platforms the same entry point is compiled
- * and registered, but returns ST_UNSUPPORTED so package load never fails and
- * the broker capability is simply absent (the R layer maps this to a typed
+ * This file performs NO schema work: it enforces only the raw frame (version
+ * byte, uint32 big-endian length, hard 64 KiB cap, complete read) and hands the
+ * body bytes to the R layer, which does strict yyjsonr validation. Every
+ * failure is reported as a typed status so the R sink can fail closed.
+ *
+ * Platform guard: the broker is Linux-only (SO_PEERCRED, systemd socket
+ * activation), so the real client compiles ONLY under __linux__. Everywhere
+ * else -- Windows, macOS, other Unix -- the same entry points are compiled and
+ * registered but return ST_UNSUPPORTED, so package load never fails and the
+ * broker capability is simply absent (the R layer maps this to a typed
  * runix_broker_unavailable and never claims system-durable audit there).
  */
+#ifdef __linux__
+#define _GNU_SOURCE /* struct ucred / SO_PEERCRED */
+#endif
+
 #include <R.h>
 #include <Rinternals.h>
 #include <R_ext/Rdynload.h>
 
+#include <limits.h>
 #include <string.h>
 
 /* status codes returned to R in list(status=, body=) */
@@ -27,10 +42,41 @@
 #define RAB_ST_TIMEOUT 2      /* a deadline passed */
 #define RAB_ST_BAD_FRAME 3    /* bad version / oversize / truncated response */
 #define RAB_ST_IO 4           /* socket error, or peer closed without a reply */
-#define RAB_ST_UNSUPPORTED 5  /* AF_UNIX unavailable on this platform */
+#define RAB_ST_UNSUPPORTED 5  /* the broker client is Linux-only */
+#define RAB_ST_PEER 6         /* server peer uid is not the expected uid */
 
 #define RAB_PROTO_VERSION 1
 #define RAB_MAX_BODY 65536u /* 64 KiB, matching the wire protocol */
+
+/* ---- defensive .Call argument validation --------------------------------
+ * These entry points are internal, but they must not assume only the wrapper
+ * calls them: wrong types or NA would otherwise walk straight into C. */
+
+static const char *rab_arg_string(SEXP x, const char *what) {
+    if (TYPEOF(x) != STRSXP || LENGTH(x) != 1 || STRING_ELT(x, 0) == NA_STRING) {
+        error("%s must be a single non-NA string", what);
+    }
+    return CHAR(STRING_ELT(x, 0));
+}
+
+static int rab_arg_nonneg_int(SEXP x, const char *what) {
+    double v;
+    if (TYPEOF(x) == INTSXP && LENGTH(x) == 1) {
+        if (INTEGER(x)[0] == NA_INTEGER || INTEGER(x)[0] < 0) {
+            error("%s must be a non-negative, non-NA integer", what);
+        }
+        return INTEGER(x)[0];
+    }
+    if (TYPEOF(x) == REALSXP && LENGTH(x) == 1) {
+        v = REAL(x)[0];
+        if (ISNAN(v) || v < 0 || v > INT_MAX) {
+            error("%s must be a non-negative, non-NA integer", what);
+        }
+        return (int) v;
+    }
+    error("%s must be a single numeric value", what);
+    return 0; /* unreached */
+}
 
 /* Build list(status=<int>, body=<raw|NULL>). */
 static SEXP rab_result(int status, SEXP body) {
@@ -45,7 +91,7 @@ static SEXP rab_result(int status, SEXP body) {
     return out;
 }
 
-#ifndef _WIN32
+#ifdef __linux__
 
 #include <errno.h>
 #include <fcntl.h>
@@ -55,17 +101,24 @@ static SEXP rab_result(int status, SEXP body) {
 #include <time.h>
 #include <unistd.h>
 
+/* Monotonic milliseconds; -1 if the clock itself fails (treated as IO). */
 static long long rab_now_ms(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return -1;
+    }
     return (long long) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /* Wait for `events` on fd until the absolute monotonic deadline.
- * 1 = ready, 0 = deadline passed, -1 = error. */
+ * 1 = ready, 0 = deadline passed, -1 = error (including clock failure). */
 static int rab_wait(int fd, short events, long long deadline_ms) {
     for (;;) {
-        long long rem = deadline_ms - rab_now_ms();
+        long long now = rab_now_ms();
+        if (now < 0) {
+            return -1;
+        }
+        long long rem = deadline_ms - now;
         if (rem <= 0) {
             return 0;
         }
@@ -87,7 +140,8 @@ static int rab_wait(int fd, short events, long long deadline_ms) {
     }
 }
 
-/* 0 ok, -2 timeout, -1 io. */
+/* 0 ok, -2 timeout, -1 io. MSG_NOSIGNAL: a peer that closed must yield EPIPE,
+ * never a SIGPIPE into the R process. */
 static int rab_write_all(int fd, const unsigned char *buf, size_t n,
                          long long dl) {
     size_t off = 0;
@@ -99,7 +153,7 @@ static int rab_write_all(int fd, const unsigned char *buf, size_t n,
         if (w < 0) {
             return -1;
         }
-        ssize_t k = write(fd, buf + off, n - off);
+        ssize_t k = send(fd, buf + off, n - off, MSG_NOSIGNAL);
         if (k < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
@@ -137,14 +191,26 @@ static int rab_read_all(int fd, unsigned char *buf, size_t n, long long dl) {
     return 0;
 }
 
+/* 1 = peer uid matches, 0 = mismatch, -1 = cannot tell (fail closed as IO). */
+static int rab_peer_uid_ok(int fd, int expected_uid) {
+    struct ucred cred;
+    socklen_t cl = sizeof cred;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cl) < 0 ||
+        cl != sizeof cred) {
+        return -1;
+    }
+    return cred.uid == (uid_t) expected_uid ? 1 : 0;
+}
+
 SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
-                       SEXP send_ms_) {
-    const char *path = CHAR(STRING_ELT(path_, 0));
-    const char *body = CHAR(STRING_ELT(body_, 0));
+                       SEXP send_ms_, SEXP expected_uid_) {
+    const char *path = rab_arg_string(path_, "path");
+    const char *body = rab_arg_string(body_, "body");
+    int connect_ms = rab_arg_nonneg_int(connect_ms_, "connect_ms");
+    int recv_ms = rab_arg_nonneg_int(recv_ms_, "recv_ms");
+    int send_ms = rab_arg_nonneg_int(send_ms_, "send_ms");
+    int expected_uid = rab_arg_nonneg_int(expected_uid_, "expected_uid");
     size_t blen = strlen(body);
-    int connect_ms = asInteger(connect_ms_);
-    int recv_ms = asInteger(recv_ms_);
-    int send_ms = asInteger(send_ms_);
     if (blen > RAB_MAX_BODY) {
         return rab_result(RAB_ST_BAD_FRAME, R_NilValue);
     }
@@ -168,7 +234,12 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     }
     strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
 
-    long long cdl = rab_now_ms() + (connect_ms > 0 ? connect_ms : 0);
+    long long now = rab_now_ms();
+    if (now < 0) {
+        close(fd);
+        return rab_result(RAB_ST_IO, R_NilValue);
+    }
+    long long cdl = now + connect_ms;
     if (connect(fd, (struct sockaddr *) &addr, sizeof addr) < 0) {
         if (errno == ENOENT || errno == ECONNREFUSED) {
             close(fd);
@@ -204,8 +275,21 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
         }
     }
 
+    /* Authenticate the SERVER before a single request byte is sent: an
+     * unexpected peer uid never even receives the request. */
+    int pk = rab_peer_uid_ok(fd, expected_uid);
+    if (pk != 1) {
+        close(fd);
+        return rab_result(pk == 0 ? RAB_ST_PEER : RAB_ST_IO, R_NilValue);
+    }
+
     /* frame and send: [version][uint32 be length][body] */
-    long long sdl = rab_now_ms() + (send_ms > 0 ? send_ms : 0);
+    now = rab_now_ms();
+    if (now < 0) {
+        close(fd);
+        return rab_result(RAB_ST_IO, R_NilValue);
+    }
+    long long sdl = now + send_ms;
     unsigned char hdr[5];
     hdr[0] = (unsigned char) RAB_PROTO_VERSION;
     hdr[1] = (unsigned char) ((blen >> 24) & 0xff);
@@ -222,7 +306,12 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     }
 
     /* read one framed response */
-    long long rdl = rab_now_ms() + (recv_ms > 0 ? recv_ms : 0);
+    now = rab_now_ms();
+    if (now < 0) {
+        close(fd);
+        return rab_result(RAB_ST_IO, R_NilValue);
+    }
+    long long rdl = now + recv_ms;
     unsigned char rhdr[5];
     int rr = rab_read_all(fd, rhdr, 5, rdl);
     if (rr != 0) {
@@ -257,24 +346,135 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     return out;
 }
 
-#else /* _WIN32: AF_UNIX broker not supported here */
+/* ---- test support: serve one connection with verbatim reply bytes --------
+ * Internal-only harness used (from a forked child) to exercise the client
+ * against a hostile/misbehaving responder: malformed frames, semantic garbage
+ * in valid frames, a silent server (deadline behaviour), and -- because the
+ * fake server runs unprivileged -- the server-peer-uid refusal. `reply` is
+ * written VERBATIM (raw frame bytes), so tests control every byte on the wire.
+ * Not part of any public API and never used by the sink itself. */
+SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
+                           SEXP delay_ms_) {
+    const char *path = rab_arg_string(path_, "path");
+    if (TYPEOF(reply_) != RAWSXP) {
+        error("reply must be a raw vector");
+    }
+    if (TYPEOF(read_first_) != LGLSXP || LENGTH(read_first_) != 1 ||
+        LOGICAL(read_first_)[0] == NA_LOGICAL) {
+        error("read_first must be a single non-NA logical");
+    }
+    int read_first = LOGICAL(read_first_)[0];
+    int delay_ms = rab_arg_nonneg_int(delay_ms_, "delay_ms");
+
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (lfd < 0) {
+        return ScalarInteger(-1);
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof addr.sun_path) {
+        close(lfd);
+        return ScalarInteger(-1);
+    }
+    strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+    unlink(path);
+    if (bind(lfd, (struct sockaddr *) &addr, sizeof addr) != 0 ||
+        listen(lfd, 1) != 0) {
+        close(lfd);
+        return ScalarInteger(-1);
+    }
+
+    long long now = rab_now_ms();
+    if (now < 0) {
+        close(lfd);
+        unlink(path);
+        return ScalarInteger(-1);
+    }
+    int rc = 0;
+    int cfd = -1;
+    if (rab_wait(lfd, POLLIN, now + 10000) == 1) {
+        cfd = accept(lfd, NULL, NULL);
+    }
+    if (cfd < 0) {
+        rc = -2; /* nobody connected */
+    } else {
+        int cfl = fcntl(cfd, F_GETFL, 0);
+        if (cfl >= 0) {
+            fcntl(cfd, F_SETFL, cfl | O_NONBLOCK);
+        }
+        if (read_first) {
+            /* consume the request frame (header + bounded body), best-effort */
+            long long rdl0 = rab_now_ms();
+            if (rdl0 >= 0) {
+                long long rdl = rdl0 + 2000;
+                unsigned char h[5];
+                if (rab_read_all(cfd, h, 5, rdl) == 0) {
+                    unsigned int n = ((unsigned int) h[1] << 24) |
+                                     ((unsigned int) h[2] << 16) |
+                                     ((unsigned int) h[3] << 8) |
+                                     (unsigned int) h[4];
+                    if (n > 0 && n <= RAB_MAX_BODY) {
+                        unsigned char *tmp = (unsigned char *) malloc(n);
+                        if (tmp != NULL) {
+                            (void) rab_read_all(cfd, tmp, n, rdl);
+                            free(tmp);
+                        }
+                    }
+                }
+            }
+        }
+        if (delay_ms > 0) {
+            struct timespec ts;
+            ts.tv_sec = delay_ms / 1000;
+            ts.tv_nsec = (long) (delay_ms % 1000) * 1000000L;
+            nanosleep(&ts, NULL);
+        }
+        R_xlen_t rl = XLENGTH(reply_);
+        if (rl > 0) {
+            long long wdl0 = rab_now_ms();
+            if (wdl0 >= 0 &&
+                rab_write_all(cfd, RAW(reply_), (size_t) rl, wdl0 + 2000) != 0) {
+                rc = -3;
+            }
+        }
+        close(cfd);
+    }
+    close(lfd);
+    unlink(path);
+    return ScalarInteger(rc);
+}
+
+#else /* not __linux__: the broker client is Linux-only */
 
 SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
-                       SEXP send_ms_) {
-    (void) path_;
-    (void) body_;
-    (void) connect_ms_;
-    (void) recv_ms_;
-    (void) send_ms_;
+                       SEXP send_ms_, SEXP expected_uid_) {
+    /* validate anyway: misuse should error identically on every platform */
+    (void) rab_arg_string(path_, "path");
+    (void) rab_arg_string(body_, "body");
+    (void) rab_arg_nonneg_int(connect_ms_, "connect_ms");
+    (void) rab_arg_nonneg_int(recv_ms_, "recv_ms");
+    (void) rab_arg_nonneg_int(send_ms_, "send_ms");
+    (void) rab_arg_nonneg_int(expected_uid_, "expected_uid");
     return rab_result(RAB_ST_UNSUPPORTED, R_NilValue);
+}
+
+SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
+                           SEXP delay_ms_) {
+    (void) path_;
+    (void) reply_;
+    (void) read_first_;
+    (void) delay_ms_;
+    return ScalarInteger(-99); /* unsupported platform */
 }
 
 #endif
 
 static const R_CallMethodDef rab_call_methods[] = {
-    /* registered as "rab_broker_call"; useDynLib(.fixes = "C_") binds it to the
-     * R symbol object C_rab_broker_call. */
-    {"rab_broker_call", (DL_FUNC) &C_rab_broker_call, 5},
+    /* registered without the C_ prefix; useDynLib(.fixes = "C_") binds them to
+     * the R symbol objects C_rab_broker_call / C_rab_test_serve_once. */
+    {"rab_broker_call", (DL_FUNC) &C_rab_broker_call, 6},
+    {"rab_test_serve_once", (DL_FUNC) &C_rab_test_serve_once, 4},
     {NULL, NULL, 0}};
 
 void R_init_runix(DllInfo *dll) {
