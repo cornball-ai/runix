@@ -30,7 +30,7 @@ types audit records use (character, numeric, integer, logical, `NULL`,
 model correctly (unsupported classes, non-finite numbers, invalid UTF-8,
 duplicate object keys, nesting beyond `max_depth`) rather than emit
 something wrong. A consumer that needs a fuller or faster encoder (e.g.
-`yyjsonr`) can inject it wherever this is used.
+`janssonr`) can inject it wherever this is used.
 }
 \examples{
 encode_json_line(list(a = 1L, b = "x", c = TRUE, d = NA))

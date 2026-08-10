@@ -80,8 +80,8 @@ audit_scope_for <- function(scope = c("system", "user"),
 #'     socket_path = tempfile(fileext = ".sock"))
 #' @export
 system_durable_audit_available <- function(root = .euid_is_root(),
-                                           socket_path = "/run/runix-audit.sock",
-                                           connect_ms = 500L) {
+    socket_path = "/run/runix-audit.sock",
+    connect_ms = 500L) {
     if (isTRUE(root)) {
         return(TRUE)
     }

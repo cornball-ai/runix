@@ -68,16 +68,16 @@
 broker_available <- function(socket_path = "/run/runix-audit.sock",
                              connect_ms = 500L) {
     st <- .broker_probe(socket_path, 0L, connect_ms)
-    switch(as.character(as.integer(st)),
-           "0" = "available", "1" = "unavailable", "2" = "timeout",
-           "6" = "untrusted", "5" = "unsupported", "error")
+    switch(as.character(as.integer(st)), "0" = "available",
+           "1" = "unavailable", "2" = "timeout", "6" = "untrusted",
+           "5" = "unsupported", "error")
 }
 
 ## Map a non-OK transport status to a typed, binding-free error code.
 .broker_status_error <- function(status) {
     switch(as.character(as.integer(status)),
-           "1" = "runix_broker_unavailable",  # no socket / refused
-           "5" = "runix_broker_unavailable",  # the client is Linux-only
+           "1" = "runix_broker_unavailable", # no socket / refused
+           "5" = "runix_broker_unavailable", # the client is Linux-only
            "2" = "runix_broker_timeout",
            "3" = "runix_broker_bad_response",
            "4" = "runix_broker_io",
@@ -95,17 +95,17 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 ## checks; a fixture pins that rejection (one top-level, one nested).
 
 .BROKER_SHAPES <- list(
-    outcome_ok = c("ok", "persisted"),
-    emit_ok    = c("audit_scope", "correlation_id", "ok", "persisted"),
-    open_ok    = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
-    error      = c("error", "message", "ok"))
+                       outcome_ok = c("ok", "persisted"),
+                       emit_ok = c("audit_scope", "correlation_id", "ok", "persisted"),
+                       open_ok = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
+                       error = c("error", "message", "ok"))
 
 ## The broker's closed error-code set (PROTOCOL.md). Anything else in an error
 ## response is itself a malformed response.
 .BROKER_ERROR_CODES <- c("bad_frame", "too_large", "bad_json",
-                         "unknown_request", "schema_invalid", "unknown_intent",
-                         "actor_mismatch", "rate_limited", "persist_failed",
-                         "internal")
+                         "unknown_request", "schema_invalid",
+                         "unknown_intent", "actor_mismatch", "rate_limited",
+                         "persist_failed", "internal")
 
 ## Documented value formats: a correlation id is a 20-digit microsecond
 ## timestamp, a dash, and 16 hex chars; a binding is exactly 32 hex chars.
@@ -165,11 +165,12 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
             ## malformed response, not a different flavour of success.
             if (!.broker_is_str(parsed$audit_scope) ||
                 !identical(parsed$audit_scope, "system")) {
-                return(list(kind = "invalid", reason = "audit_scope not system"))
+                return(list(kind = "invalid",
+                            reason = "audit_scope not system"))
             }
             if (identical(kind, "open_ok") &&
                 (!.broker_is_str(parsed$binding) ||
-                 !grepl(.BROKER_BINDING_RE, parsed$binding))) {
+                    !grepl(.BROKER_BINDING_RE, parsed$binding))) {
                 return(list(kind = "invalid", reason = "bad binding"))
             }
         }
@@ -216,7 +217,11 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     trusted <- identical(expected_peer_uid, 0L)
     ## the ONLY scope this sink may claim; root-peer sinks earn "system",
     ## everything else is downgraded regardless of the wire response.
-    claimed_scope <- if (trusted) "system" else "untrusted"
+    if (trusted) {
+        claimed_scope <- "system"
+    } else {
+        claimed_scope <- "untrusted"
+    }
 
     ## Encode + send a request; return a validated response or a typed failure.
     call <- function(req) {
@@ -224,8 +229,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         if (inherits(body, "condition")) {
             return(list(kind = "invalid", error = "runix_broker_bad_request"))
         }
-        res <- .broker_call(socket_path, body, connect_ms, recv_ms, send_ms,
-                            expected_peer_uid)
+        res <- .broker_call(socket_path, body, connect_ms, recv_ms,
+                            send_ms, expected_peer_uid)
         if (!identical(as.integer(res$status), .RAB_ST_OK)) {
             return(list(kind = "transport",
                         error = .broker_status_error(res$status)))
@@ -258,7 +263,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 
     write_outcome <- function(receipt, record) {
         bind <- receipt$binding
-        if (is.null(bind) || length(bind) != 1L || is.na(bind) || !nzchar(bind)) {
+        if (is.null(bind) || length(bind) != 1L || is.na(bind) ||
+            !nzchar(bind)) {
             return(list(persisted = FALSE, error = "runix_broker_no_binding"))
         }
         v <- call(list(type = "write_outcome", binding = bind, record = record))
@@ -273,7 +279,7 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         ## Rejected here, locally, so a wrong phase never even reaches the
         ## wire. The broker mints ids; a caller-supplied id is ignored.
         if (!(is.character(phase) && length(phase) == 1L &&
-              phase %in% c("preview", "noop"))) {
+                phase %in% c("preview", "noop"))) {
             return(fail_receipt("runix_broker_bad_phase"))
         }
         v <- call(list(type = "emit", phase = phase, record = record))
