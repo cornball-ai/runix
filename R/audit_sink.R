@@ -415,11 +415,19 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory",
 ## --- fsync and fallback -----------------------------------------------------
 
 ## Real fsync via coreutils `sync --data <file>` (fdatasync on the file's fd).
-## Errors on failure so the caller can report persisted = FALSE honestly.
+## Falls back to a bare `sync` (all filesystems) where `--data` is unsupported
+## (BSD/macOS `sync` takes no options): coarser, but a genuine flush to stable
+## storage. Errors only if neither works, so the caller can report
+## persisted = FALSE honestly (e.g. on a host with no `sync` at all, like
+## Windows, where fsync durability is simply unavailable).
 .default_syncer <- function(path) {
     status <- suppressWarnings(
                                system2("sync", c("--data", shQuote(path)), stdout = FALSE,
                                        stderr = FALSE))
+    if (identical(as.integer(status), 0L)) {
+        return(invisible(TRUE))
+    }
+    status <- suppressWarnings(system2("sync", stdout = FALSE, stderr = FALSE))
     if (!identical(as.integer(status), 0L)) {
         stop("fsync via 'sync' failed for ", path, " (status ", status, ")")
     }

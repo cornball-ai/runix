@@ -76,27 +76,55 @@ jobs:
         with:
           extra-packages: any::tinytest
 
+      # bash so `R CMD INSTALL` runs the same everywhere (the Windows runner's
+      # default shell is PowerShell, which mis-parses `R CMD INSTALL .`)
       - name: Install runix (compiles the guarded stub)
+        shell: bash
         run: R CMD INSTALL .
 
-      - name: Load, and prove the broker is typed-unavailable off Linux
+      - name: Gate 5 - install/load, broker typed-unavailable, portable sinks
         shell: Rscript {0}
         run: |
           library(runix)
+          ## the broker is Linux-only: every call is typed-unavailable here,
+          ## claiming no scope, and never throwing
           s <- broker_audit_sink()
           r <- s$open_intent(list(operation = "x", outcome = "intent"))
           stopifnot(!isTRUE(r$persisted),
                     identical(r$error, "runix_broker_unavailable"),
                     is.na(r$audit_scope))
-          # portable sinks still work
+          stopifnot(identical(
+              s$emit(list(outcome = "preview"), "preview")$error,
+              "runix_broker_unavailable"))
+          ## portable sinks remain functional in their platform-honest modes
           m <- memory_audit_sink()
           stopifnot(isTRUE(m$emit(list(outcome = "ok"), "outcome")$persisted))
-          cat("stub OK on", Sys.info()[["sysname"]], "\n")
+          f <- file_audit_sink(tempfile(fileext = ".jsonl"), durability = "none")
+          stopifnot(isTRUE(f$emit(list(outcome = "ok"), "outcome")$persisted))
+          ## the shared response-schema corpus validates identically off Linux
+          man <- read.delim(system.file("tinytest", "fixtures",
+              "broker-frames", "manifest.tsv", package = "runix"),
+              stringsAsFactors = FALSE)
+          man <- man[man$layer == "body", ]
+          pr <- getFromNamespace(".broker_parse_response", "runix")
+          bad <- 0L
+          for (i in seq_len(nrow(man))) {
+            body <- readBin(system.file("tinytest", "fixtures", "broker-frames",
+                man$file[i], package = "runix"), "raw", n = 1e5)
+            accepted <- !identical(pr(body)$kind, "invalid")
+            if (accepted != (man$accept[i] == 1L)) bad <- bad + 1L
+          }
+          stopifnot(bad == 0L)
+          cat("gate 5 OK on", Sys.info()[["sysname"]], "\n")
 
-      - name: Tests (portable sinks + schema fixtures; broker tests self-skip)
+      # macOS has a POSIX `sync` (no --data): prove the syncer fallback makes
+      # fsync file durability genuinely hold there. Windows has no `sync`, so
+      # fsync durability is honestly unavailable and not asserted.
+      - name: macOS - fsync file durability via the sync fallback
+        if: runner.os == 'macOS'
         shell: Rscript {0}
         run: |
-          r <- tinytest::test_package("runix")
-          n <- sum(!vapply(r, isTRUE, logical(1)))
-          cat(length(r), "checks,", n, "failures\n")
-          quit(status = as.integer(n > 0))
+          library(runix)
+          f <- file_audit_sink(tempfile(fileext = ".jsonl"), durability = "fsync")
+          stopifnot(isTRUE(f$emit(list(outcome = "ok"), "outcome")$persisted))
+          cat("macOS fsync OK\n")
