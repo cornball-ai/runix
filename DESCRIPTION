@@ -16,12 +16,13 @@ Description: The near-zero-dependency common core shared by the Runix subsystem
     rotation, and honest persistence reporting), and the AF_UNIX client for the
     privileged audit broker. Subsystem packages ('pkgstate', 'rsystemd', ...)
     import this; it never imports them, and its only dependency is 'yyjsonr'
-    for strict validation of broker responses. The broker client is
-    Linux-only: on Windows and other platforms it returns a typed
-    'runix_broker_unavailable' and system-durable audit is reported absent,
-    while the core, memory sink, and portable file-sink guarantees remain
-    available. The package installs and loads everywhere.
+    for strict validation of broker responses. This is a Unix package (it
+    administers a Linux host); the broker client is Linux-only, returning a
+    typed 'runix_broker_unavailable' on other Unix platforms where
+    system-durable audit is reported absent, while the core, memory sink, and
+    portable file-sink guarantees remain available.
 License: MIT + file LICENSE
+OS_type: unix
 Imports: yyjsonr
 SystemRequirements: coreutils 'sync' (for fsync/fdatasync of the audit sink
     and its parent directory); Linux procfs '/proc' for audit lock-owner

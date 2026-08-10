@@ -49,15 +49,17 @@ jobs:
       - name: R CMD check (CRAN cleanliness)
         run: ./run.sh run_tests
 
-  # Windows and macOS: the broker is Linux-only. The package must still install,
-  # load, and keep its portable sinks working, while every broker call returns a
-  # typed runix_broker_unavailable (the compiled stub). A successful build here
-  # is also the proof of "no accidental Unix header/link dependency".
+  # Non-Linux Unix (macOS): runix is a Unix package, but the broker is
+  # Linux-only. On other Unix the package must still install, load, and keep its
+  # portable sinks working while every broker call returns a typed
+  # runix_broker_unavailable (the compiled stub) -- proof the broker transport's
+  # __linux__ guard holds and no Linux-only header leaks into the stub. Windows
+  # is out of scope (runix administers a Linux host).
   stub:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
