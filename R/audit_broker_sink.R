@@ -183,13 +183,24 @@
     "runix_broker_bad_response" # a valid-but-wrong shape
 }
 
-## The worker behind broker_audit_sink(). `expected_peer_uid` exists ONLY as an
-## internal test seam (a test harness runs an unprivileged broker and injects
-## its own uid); the public constructor pins it to root and there is
-## deliberately no public way to loosen it.
+## The worker behind broker_audit_sink(). `expected_peer_uid` is the uid the
+## transport requires of the server peer. It exists as an internal test seam (a
+## harness runs an UNPRIVILEGED broker and injects its own uid); but the seam is
+## not itself a security boundary, because `:::` is callable by anyone. So the
+## system-durability CLAIM is coupled structurally to root: ONLY a sink that
+## authenticates its peer as root (expected uid 0) ever stamps
+## audit_scope = "system". A non-root peer -- the test transport, or any caller
+## who reaches this via `:::` -- yields a sink whose receipts are scoped
+## "untrusted" and can never advertise system durability, whatever the broker's
+## response claims. The public constructor pins uid 0 and exposes no override.
 .broker_audit_sink <- function(socket_path, connect_ms, recv_ms, send_ms,
                                expected_peer_uid = 0L) {
     force(socket_path)
+    expected_peer_uid <- as.integer(expected_peer_uid)
+    trusted <- identical(expected_peer_uid, 0L)
+    ## the ONLY scope this sink may claim; root-peer sinks earn "system",
+    ## everything else is downgraded regardless of the wire response.
+    claimed_scope <- if (trusted) "system" else "untrusted"
 
     ## Encode + send a request; return a validated response or a typed failure.
     call <- function(req) {
@@ -222,9 +233,10 @@
             return(fail_receipt(.broker_err_code(v)))
         }
         ## the binding lives ONLY here, in the in-memory receipt, for the paired
-        ## write_outcome; it is never logged or written anywhere else.
+        ## write_outcome; it is never logged or written anywhere else. The scope
+        ## is this sink's earned scope, not the wire value.
         list(correlation_id = v$fields$correlation_id, persisted = TRUE,
-             audit_scope = v$fields$audit_scope, binding = v$fields$binding,
+             audit_scope = claimed_scope, binding = v$fields$binding,
              error = NULL)
     }
 
@@ -253,7 +265,7 @@
             return(fail_receipt(.broker_err_code(v)))
         }
         list(correlation_id = v$fields$correlation_id, persisted = TRUE,
-             audit_scope = v$fields$audit_scope, binding = NULL, error = NULL)
+             audit_scope = claimed_scope, binding = NULL, error = NULL)
     }
 
     ## The broker exposes no generic append: emit/open_intent/write_outcome are
@@ -263,7 +275,7 @@
     }
 
     list(open_intent = open_intent, write_outcome = write_outcome, emit = emit,
-         write = write, kind = "broker", audit_scope = "system",
+         write = write, kind = "broker", audit_scope = claimed_scope,
          durability = "fsync", socket_path = socket_path)
 }
 

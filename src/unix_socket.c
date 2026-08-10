@@ -25,7 +25,7 @@
  * broker capability is simply absent (the R layer maps this to a typed
  * runix_broker_unavailable and never claims system-durable audit there).
  */
-#ifdef __linux__
+#if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE /* struct ucred / SO_PEERCRED */
 #endif
 
@@ -96,7 +96,9 @@ static SEXP rab_result(int status, SEXP body) {
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -366,6 +368,19 @@ SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
     int read_first = LOGICAL(read_first_)[0];
     int delay_ms = rab_arg_nonneg_int(delay_ms_, "delay_ms");
 
+    /* Inert in production: this test-only responder does nothing unless a test
+     * explicitly opts in via the environment. The symbol must ship (an R
+     * package's src builds as one object), so gate the capability instead. */
+    if (getenv("RUNIX_ALLOW_TEST_SERVER") == NULL) {
+        return ScalarInteger(-98); /* refused: not enabled */
+    }
+    /* Refuse a path that already exists rather than clobber it: this server
+     * only ever removes a socket IT created (owns_path below). */
+    struct stat pst;
+    if (lstat(path, &pst) == 0) {
+        return ScalarInteger(-97); /* path exists; refuse */
+    }
+
     int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (lfd < 0) {
         return ScalarInteger(-1);
@@ -378,12 +393,12 @@ SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
         return ScalarInteger(-1);
     }
     strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
-    unlink(path);
     if (bind(lfd, (struct sockaddr *) &addr, sizeof addr) != 0 ||
         listen(lfd, 1) != 0) {
         close(lfd);
-        return ScalarInteger(-1);
+        return ScalarInteger(-1); /* bind failed: we created nothing to remove */
     }
+    /* from here on we own the socket file and must remove it on every path */
 
     long long now = rab_now_ms();
     if (now < 0) {

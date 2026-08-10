@@ -71,8 +71,22 @@ is_linux <- identical(Sys.info()[["sysname"]], "Linux")
 if (tinytest::at_home() && is_linux &&
     requireNamespace("parallel", quietly = TRUE)) {
 
+    ## the test responder is inert unless explicitly enabled
+    old_allow <- Sys.getenv("RUNIX_ALLOW_TEST_SERVER", unset = NA)
+    Sys.setenv(RUNIX_ALLOW_TEST_SERVER = "1")
+    on.exit({
+        if (is.na(old_allow)) {
+            Sys.unsetenv("RUNIX_ALLOW_TEST_SERVER")
+        } else {
+            Sys.setenv(RUNIX_ALLOW_TEST_SERVER = old_allow)
+        }
+    }, add = TRUE)
+
     myuid <- suppressWarnings(as.integer(system("id -u", intern = TRUE))[1])
     expect_true(is.finite(myuid))
+    ## a non-root peer never earns system scope (this uid pins itself via the
+    ## seam); root-run CI would earn "system".
+    expected_scope <- if (identical(myuid, 0L)) "system" else "untrusted"
 
     be32 <- function(n) {
         as.raw(c(bitwAnd(bitwShiftR(n, 24L), 255L),
@@ -112,11 +126,16 @@ if (tinytest::at_home() && is_linux &&
         '"correlation_id":"00001786382512165708-a061ec02cffe1b2b",',
         '"ok":true,"persisted":true}')
 
-    ## non-vacuity: a well-formed reply from a trusted (test-uid) peer succeeds,
-    ## so every refusal below is the guard, not a broken harness
+    ## non-vacuity: a well-formed reply from a peer whose uid this sink expects
+    ## succeeds, so every refusal below is the guard, not a broken harness. And
+    ## it proves the anti-laundering downgrade: even a byte-perfect open_ok
+    ## claiming "system" yields an "untrusted" receipt when the peer is not root.
     ok <- exchange(frame(VALID_OPEN), open1)
     expect_true(isTRUE(ok$persisted))
-    expect_equal(ok$audit_scope, "system")
+    expect_equal(ok$audit_scope, expected_scope)
+    if (!identical(myuid, 0L)) {
+        expect_true(!identical(ok$audit_scope, "system"))
+    }
 
     ## SERVER PEER NOT ROOT: the production sink (expected uid 0) refuses this
     ## same valid-looking responder BEFORE sending the request -- a malicious
@@ -169,6 +188,9 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
     sock <- file.path(dir, "sock")
     sink <- file.path(dir, "audit.jsonl")
     myuid <- suppressWarnings(as.integer(system("id -u", intern = TRUE))[1])
+    ## the test broker runs as this (typically non-root) uid, so its sink is
+    ## scoped "untrusted"; a root broker (root-run CI, or the VM gate) is "system".
+    expected_scope <- if (identical(myuid, 0L)) "system" else "untrusted"
 
     launch <- function() {
         cmd <- sprintf("%s --listen %s --sink %s >/dev/null 2>&1 & echo $!",
@@ -202,7 +224,7 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
     ## happy path: open_intent -> write_outcome, system-durable
     r <- s$open_intent(list(operation = "svc.restart", outcome = "intent"))
     expect_true(isTRUE(r$persisted))
-    expect_equal(r$audit_scope, "system")
+    expect_equal(r$audit_scope, expected_scope)
     expect_true(grepl("^[0-9a-f]{32}$", r$binding))
     expect_true(grepl("^[0-9]{20}-[0-9a-f]{16}$", r$correlation_id))
     st <- s$write_outcome(r, list(operation = "svc.restart", outcome = "ok",
