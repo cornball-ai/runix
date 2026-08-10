@@ -3,6 +3,8 @@
 export(audit_emit)
 export(audit_scope_for)
 export(audit_two_phase)
+export(broker_audit_sink)
+export(broker_available)
 export(default_audit_sink)
 export(encode_json_line)
 export(file_audit_sink)
@@ -17,3 +19,5 @@ export(sys_clock)
 export(system_durable_audit_available)
 
 S3method(print,runix_result)
+
+useDynLib(runix, .registration = TRUE, .fixes = "C_")

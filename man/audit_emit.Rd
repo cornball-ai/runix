@@ -3,15 +3,17 @@
 \alias{audit_emit}
 \title{Emit a single framed audit record}
 \usage{
-audit_emit(sink, record, phase = "outcome", correlation_id = NULL)
+audit_emit(sink, record, phase, correlation_id = NULL)
 }
 \arguments{
 \item{sink}{An audit sink (see \code{\link{file_audit_sink}}).}
 
 \item{record}{A named list: the record's domain content.}
 
-\item{phase}{Record phase, e.g. \code{"intent"}, \code{"outcome"},
-\code{"preview"}, \code{"noop"}.}
+\item{phase}{Record phase, e.g. \code{"preview"} or \code{"noop"}. Required:
+a single-record emit must name what it records. A broker sink accepts only
+the non-effect phases \code{"preview"}/\code{"noop"}; local sinks also
+accept other phases for their own record-keeping.}
 
 \item{correlation_id}{Optional operation id; default lets the sink mint one
 (the broker mints server-side; local sinks use their \code{id_fn}).}

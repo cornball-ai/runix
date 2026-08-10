@@ -62,22 +62,30 @@ audit_scope_for <- function(scope = c("system", "user"),
 
 #' Is system-durable audit available on this host?
 #'
-#' True only when a mutation's audit can be written durably to the
-#' root-owned system sink: the caller is root, or a privileged audit broker is
-#' present. No broker exists yet, so this is root-only for now. A fleet policy
-#' reads this to refuse system-scope mutations that would only be
-#' caller-durably audited.
+#' True only when a mutation's audit can be written durably to the root-owned
+#' system sink: the caller is root, or a root-authenticated audit broker is
+#' reachable. Broker availability is a bounded, side-effect-free RUNTIME probe
+#' (\code{\link{broker_available}}) that authenticates the broker peer as root
+#' via \code{SO_PEERCRED} and writes nothing; it is never inferred from a caller
+#' Boolean, the socket's existence, or a sink's static metadata. A fleet policy
+#' reads this to refuse system-scope mutations that would only be caller-durably
+#' audited.
 #'
 #' @param root Is the effective user root? (injectable; default detects.)
-#' @param broker Is the audit broker present? (default \code{FALSE}; no broker
-#'   yet.)
+#' @param socket_path The broker's \code{AF_UNIX} socket path.
+#' @param connect_ms Millisecond deadline for the probe connect.
 #' @return \code{TRUE} or \code{FALSE}.
 #' @examples
-#' system_durable_audit_available(root = FALSE)
+#' system_durable_audit_available(root = FALSE,
+#'     socket_path = tempfile(fileext = ".sock"))
 #' @export
 system_durable_audit_available <- function(root = .euid_is_root(),
-    broker = FALSE) {
-    isTRUE(root) || isTRUE(broker)
+                                           socket_path = "/run/runix-audit.sock",
+                                           connect_ms = 500L) {
+    if (isTRUE(root)) {
+        return(TRUE)
+    }
+    identical(broker_available(socket_path, connect_ms), "available")
 }
 
 #' Resolve the audit sink and its authority for a mutation scope
@@ -90,6 +98,9 @@ system_durable_audit_available <- function(root = .euid_is_root(),
 #' @param root Is the effective user root? (injectable; default detects.)
 #' @param xdg XDG state base for the caller-owned path (injectable).
 #' @param system_dir Directory for the root-owned system sink.
+#' @param broker_socket The audit broker's \code{AF_UNIX} socket path; an
+#'   unprivileged system-scope mutation uses the broker only when a
+#'   root-authenticated one is reachable (runtime probe).
 #' @param ... Passed to \code{\link{file_audit_sink}} (e.g. \code{durability}).
 #' @return \code{list(sink, path, audit_scope, system_durable_audit)}.
 #' @examples
@@ -100,15 +111,32 @@ system_durable_audit_available <- function(root = .euid_is_root(),
 default_audit_sink <- function(scope = c("system", "user"),
                                root = .euid_is_root(),
                                xdg = .xdg_state_home(),
-                               system_dir = "/var/log/runix", ...) {
+                               system_dir = "/var/log/runix",
+                               broker_socket = "/run/runix-audit.sock", ...) {
     scope <- match.arg(scope)
-    audit_scope <- audit_scope_for(scope, root)
-    path <- if (identical(audit_scope, "system")) {
-        file.path(system_dir, "audit.jsonl")
-    } else {
-        .xdg_audit_path(xdg)
+    ## root writes the root-owned system sink directly.
+    if (isTRUE(root)) {
+        path <- file.path(system_dir, "audit.jsonl")
+        return(list(sink = file_audit_sink(path, audit_scope = "system", ...),
+                    path = path, audit_scope = "system",
+                    system_durable_audit = TRUE))
     }
+    ## an unprivileged SYSTEM-scope mutation earns system-durable audit ONLY when
+    ## a root-authenticated broker is actually reachable (the runtime probe, not
+    ## static metadata). The broker mints its own records, so file-sink options
+    ## do not apply to it.
+    if (identical(scope, "system") &&
+        identical(broker_available(broker_socket), "available")) {
+        return(list(sink = broker_audit_sink(broker_socket),
+                    path = broker_socket, audit_scope = "system",
+                    system_durable_audit = TRUE))
+    }
+    ## otherwise the honest caller-owned sink: user scope is "user"; an
+    ## unprivileged system-scope mutation is "caller" -- recorded, but not
+    ## system-durable.
+    audit_scope <- audit_scope_for(scope, root)
+    path <- .xdg_audit_path(xdg)
     list(sink = file_audit_sink(path, audit_scope = audit_scope, ...),
          path = path, audit_scope = audit_scope,
-         system_durable_audit = system_durable_audit_available(root))
+         system_durable_audit = FALSE)
 }

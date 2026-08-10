@@ -1,27 +1,34 @@
 Package: runix
 Type: Package
 Title: Common Core for the Runix System-Administration Framework
-Version: 0.0.1.5
+Version: 0.0.1.6
 Date: 2026-08-09
 Authors@R: c(
     person("Troy", "Hernandez", role = c("aut", "cre"), email = "troy@cornball.ai",
            comment = c(ORCID = "0009-0005-4248-604X")),
     person("cornball.ai", role = "cph"))
-Description: The zero-dependency common core shared by the Runix subsystem
+Description: The near-zero-dependency common core shared by the Runix subsystem
     packages: the typed condition taxonomy and constructor, a retryability
     registry, the subsystem-neutral injectable-runner machinery (environment
     and error class supplied by the caller), the neutral result object, a
-    deterministic JSON-line encoder, and the durable-audit sink (append-only
+    deterministic JSON-line encoder, the durable-audit sink (append-only
     JSONL with two-phase intent/outcome correlation, advisory locking, fsync,
-    rotation, and honest persistence reporting). Subsystem packages
-    ('pkgstate', 'rsystemd', ...) import this; it never imports them and
-    carries no external dependencies.
+    rotation, and honest persistence reporting), and the AF_UNIX client for the
+    privileged audit broker. Subsystem packages ('pkgstate', 'rsystemd', ...)
+    import this; it never imports them, and its only dependency is 'yyjsonr'
+    for strict validation of broker responses. This is a Unix package (it
+    administers a Linux host); the broker client is Linux-only, returning a
+    typed 'runix_broker_unavailable' on other Unix platforms where
+    system-durable audit is reported absent, while the core, memory sink, and
+    portable file-sink guarantees remain available.
 License: MIT + file LICENSE
 OS_type: unix
+Imports: yyjsonr
 SystemRequirements: coreutils 'sync' (for fsync/fdatasync of the audit sink
     and its parent directory); Linux procfs '/proc' for audit lock-owner
     liveness, boot id, and process start time (absent elsewhere, lock
-    staleness degrades to an mtime timeout).
+    staleness degrades to an mtime timeout); the audit broker client uses
+    AF_UNIX and is Linux-only (absent elsewhere).
 Suggests: tinytest, jsonlite
 Encoding: UTF-8
 Config/roxygen2/version: 8.0.0
