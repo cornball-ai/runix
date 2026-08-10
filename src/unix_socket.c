@@ -348,6 +348,83 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     return out;
 }
 
+/* Bounded, SIDE-EFFECT-FREE availability probe: connect, authenticate the peer
+ * uid via SO_PEERCRED, and close WITHOUT sending a single byte -- so no audit
+ * record is ever written by a probe. Returns a status (never inferred from
+ * socket existence). This is what backs system_durable_audit_available. */
+SEXP C_rab_broker_probe(SEXP path_, SEXP expected_uid_, SEXP connect_ms_) {
+    const char *path = rab_arg_string(path_, "path");
+    int expected_uid = rab_arg_nonneg_int(expected_uid_, "expected_uid");
+    int connect_ms = rab_arg_nonneg_int(connect_ms_, "connect_ms");
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return ScalarInteger(RAB_ST_IO);
+    }
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) {
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof addr.sun_path) {
+        close(fd);
+        return ScalarInteger(RAB_ST_IO);
+    }
+    strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+    long long now = rab_now_ms();
+    if (now < 0) {
+        close(fd);
+        return ScalarInteger(RAB_ST_IO);
+    }
+    long long cdl = now + connect_ms;
+    if (connect(fd, (struct sockaddr *) &addr, sizeof addr) < 0) {
+        if (errno == ENOENT || errno == ECONNREFUSED) {
+            close(fd);
+            return ScalarInteger(RAB_ST_UNAVAILABLE);
+        }
+        if (errno == EINPROGRESS) {
+            int w = rab_wait(fd, POLLOUT, cdl);
+            if (w == 0) {
+                close(fd);
+                return ScalarInteger(RAB_ST_TIMEOUT);
+            }
+            if (w < 0) {
+                close(fd);
+                return ScalarInteger(RAB_ST_IO);
+            }
+            int soerr = 0;
+            socklen_t sl = sizeof soerr;
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) < 0) {
+                close(fd);
+                return ScalarInteger(RAB_ST_IO);
+            }
+            if (soerr == ENOENT || soerr == ECONNREFUSED) {
+                close(fd);
+                return ScalarInteger(RAB_ST_UNAVAILABLE);
+            }
+            if (soerr != 0) {
+                close(fd);
+                return ScalarInteger(RAB_ST_IO);
+            }
+        } else {
+            close(fd);
+            return ScalarInteger(RAB_ST_IO);
+        }
+    }
+    int pk = rab_peer_uid_ok(fd, expected_uid);
+    close(fd); /* no request sent: nothing is recorded */
+    if (pk == 1) {
+        return ScalarInteger(RAB_ST_OK);
+    }
+    if (pk == 0) {
+        return ScalarInteger(RAB_ST_PEER);
+    }
+    return ScalarInteger(RAB_ST_IO);
+}
+
 /* ---- test support: serve one connection with verbatim reply bytes --------
  * Internal-only harness used (from a forked child) to exercise the client
  * against a hostile/misbehaving responder: malformed frames, semantic garbage
@@ -479,6 +556,13 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     return rab_result(RAB_ST_UNSUPPORTED, R_NilValue);
 }
 
+SEXP C_rab_broker_probe(SEXP path_, SEXP expected_uid_, SEXP connect_ms_) {
+    (void) rab_arg_string(path_, "path");
+    (void) rab_arg_nonneg_int(expected_uid_, "expected_uid");
+    (void) rab_arg_nonneg_int(connect_ms_, "connect_ms");
+    return ScalarInteger(RAB_ST_UNSUPPORTED);
+}
+
 SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
                            SEXP delay_ms_) {
     (void) path_;
@@ -494,6 +578,7 @@ static const R_CallMethodDef rab_call_methods[] = {
     /* registered without the C_ prefix; useDynLib(.fixes = "C_") binds them to
      * the R symbol objects C_rab_broker_call / C_rab_test_serve_once. */
     {"rab_broker_call", (DL_FUNC) &C_rab_broker_call, 6},
+    {"rab_broker_probe", (DL_FUNC) &C_rab_broker_probe, 3},
     {"rab_test_serve_once", (DL_FUNC) &C_rab_test_serve_once, 4},
     {NULL, NULL, 0}};
 

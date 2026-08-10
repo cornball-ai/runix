@@ -8,6 +8,7 @@ default_audit_sink(
   root = .euid_is_root(),
   xdg = .xdg_state_home(),
   system_dir = "/var/log/runix",
+  broker_socket = "/run/runix-audit.sock",
   ...
 )
 }
@@ -19,6 +20,10 @@ default_audit_sink(
 \item{xdg}{XDG state base for the caller-owned path (injectable).}
 
 \item{system_dir}{Directory for the root-owned system sink.}
+
+\item{broker_socket}{The audit broker's \code{AF_UNIX} socket path; an
+unprivileged system-scope mutation uses the broker only when a
+root-authenticated one is reachable (runtime probe).}
 
 \item{...}{Passed to \code{\link{file_audit_sink}} (e.g. \code{durability}).}
 }

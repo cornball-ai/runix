@@ -312,8 +312,11 @@ expect_equal(audit_scope_for("system", root = TRUE), "system")
 expect_equal(audit_scope_for("system", root = FALSE), "caller")
 expect_equal(audit_scope_for("user", root = FALSE), "user")
 expect_true(system_durable_audit_available(root = TRUE))
-expect_false(system_durable_audit_available(root = FALSE))
-expect_true(system_durable_audit_available(root = FALSE, broker = TRUE))
+## unprivileged availability is a runtime root-authenticated probe, not a
+## Boolean: no reachable broker -> FALSE. The available/untrusted cases are
+## exercised against a real/fake broker in test_broker_sink.R.
+expect_false(system_durable_audit_available(root = FALSE,
+    socket_path = tempfile(fileext = ".sock")))
 
 ## --- receipt-based lifecycle: open_intent / write_outcome / emit ---
 ls <- memory_audit_sink(id_fn = function() "cid-life", audit_scope = "caller")
@@ -351,6 +354,7 @@ expect_true(all(grepl("cid-file", fl)))
 ## unprivileged system-scope -> caller-owned sink, honest about durability
 xdg <- file.path(td, "xdg")
 r_sys <- default_audit_sink("system", root = FALSE, xdg = xdg,
+                            broker_socket = tempfile(fileext = ".sock"),
                             durability = "none")
 expect_equal(r_sys$audit_scope, "caller")
 expect_false(r_sys$system_durable_audit)

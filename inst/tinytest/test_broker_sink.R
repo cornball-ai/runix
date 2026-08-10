@@ -73,6 +73,14 @@ expect_error(runix:::.broker_call(NA_character_, "{}"), "non-NA string")
 expect_error(runix:::.broker_call(tempfile(), "{}", connect_ms = -1L),
              "non-negative")
 
+## capability probe: a runtime, root-authenticated check, never a Boolean or
+## socket-existence guess. No socket -> unavailable -> not system-durable.
+expect_equal(broker_available(tempfile(fileext = ".sock"), connect_ms = 200L),
+             "unavailable")
+expect_true(system_durable_audit_available(root = TRUE))
+expect_false(system_durable_audit_available(root = FALSE,
+    socket_path = tempfile(fileext = ".sock"), connect_ms = 200L))
+
 ## ---- hostile fake responder (Linux + parallel only) ---------------------
 ## Every byte on the wire is a corpus frame fixture or a corpus body wrapped in
 ## a frame: the client must fail closed against malformed frames, semantic
@@ -267,6 +275,15 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
             list(operation = "svc.restart", outcome = "ok",
                  effect_issued = TRUE))$persisted))
     }
+
+    ## capability probe against the (non-root) test broker: reachable, but NOT
+    ## trusted as root, so it does not make system-durable audit available -- and
+    ## the probe is side-effect-free (writes no record).
+    before_n <- length(readLines(sink, warn = FALSE))
+    expect_equal(broker_available(sock, connect_ms = 1000L), "untrusted")
+    expect_false(system_durable_audit_available(root = FALSE, socket_path = sock,
+                                                connect_ms = 1000L))
+    expect_equal(length(readLines(sink, warn = FALSE)), before_n)
 
     ## the sink reconstructs clean and every recorded actor is this uid
     kill_broker(pid)

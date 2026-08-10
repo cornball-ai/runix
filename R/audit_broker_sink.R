@@ -42,6 +42,37 @@
           as.integer(delay_ms))
 }
 
+## Runtime, side-effect-free availability probe wrapper (see C_rab_broker_probe).
+.broker_probe <- function(path, expected_uid = 0L, connect_ms = 500L) {
+    .Call(C_rab_broker_probe, path, as.integer(expected_uid),
+          as.integer(connect_ms))
+}
+
+#' Is a root-authenticated audit broker reachable right now?
+#'
+#' A bounded, side-effect-free runtime probe: it connects to the broker socket,
+#' authenticates the peer's kernel-verified uid (\code{SO_PEERCRED}) as root, and
+#' closes WITHOUT sending a request, so no audit record is ever written. This is
+#' the honest basis for \code{\link{system_durable_audit_available}} -- never a
+#' caller Boolean, socket-existence inference, or static sink metadata.
+#'
+#' @param socket_path The broker's \code{AF_UNIX} socket path.
+#' @param connect_ms Millisecond deadline for the connect.
+#' @return One of \code{"available"} (a root peer answered),
+#'   \code{"unavailable"} (no socket / refused), \code{"untrusted"} (a non-root
+#'   peer), \code{"timeout"}, \code{"unsupported"} (not Linux), or
+#'   \code{"error"}.
+#' @examples
+#' broker_available(tempfile(fileext = ".sock"))
+#' @export
+broker_available <- function(socket_path = "/run/runix-audit.sock",
+                             connect_ms = 500L) {
+    st <- .broker_probe(socket_path, 0L, connect_ms)
+    switch(as.character(as.integer(st)),
+           "0" = "available", "1" = "unavailable", "2" = "timeout",
+           "6" = "untrusted", "5" = "unsupported", "error")
+}
+
 ## Map a non-OK transport status to a typed, binding-free error code.
 .broker_status_error <- function(status) {
     switch(as.character(as.integer(status)),

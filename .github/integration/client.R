@@ -12,6 +12,12 @@ library(runix)
 SOCK <- "/run/runix-audit.sock"                        # the systemd .socket path
 BIN <- Sys.getenv("RAB_BROKER_BIN", "/usr/libexec/runix/audit-broker")
 
+## capability probe: the runtime, root-authenticated check reports available,
+## and system_durable_audit_available agrees -- from an unprivileged process,
+## derived from the probe, not from a Boolean or the socket's mere existence.
+stopifnot(identical(broker_available(SOCK), "available"),
+          isTRUE(system_durable_audit_available(root = FALSE, socket_path = SOCK)))
+
 ## The broker runs as root (systemd), so the root-pinned public sink
 ## authenticates it (SO_PEERCRED uid 0) and earns "system".
 s <- broker_audit_sink(socket_path = SOCK)
