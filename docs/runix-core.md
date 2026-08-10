@@ -77,9 +77,10 @@ Binding for the extraction pass:
 ## What stays out of `runix`
 
 - **The JSON encoder and CLI envelope live in `rctl`** — deterministic
-  encoding, yyjsonr backend, the `schema_version`/`ok`/`error` envelope,
-  exit-code mapping. These are CLI concerns, not foundational; `runix` must
-  not depend on yyjsonr or know about the wire format.
+  encoding (janssonr backend), the `schema_version`/`ok`/`error` envelope,
+  exit-code mapping. These are CLI concerns, not foundational; the core does
+  not produce the CLI wire format. (runix uses janssonr itself, but only to
+  parse audit-broker responses — a separate concern from the CLI envelope.)
 - Anything subsystem-specific (systemd job correlation, apt policy parsing).
 
 ## Extraction plan (the focused pass)
