@@ -4,7 +4,7 @@
 \title{An AF_UNIX audit-broker client sink}
 \usage{
 broker_audit_sink(
-  socket_path = "/run/runix/audit-broker.sock",
+  socket_path = "/run/runix-audit.sock",
   connect_ms = 2000L,
   recv_ms = 5000L,
   send_ms = 5000L
@@ -50,6 +50,6 @@ macOS, and other platforms every call returns
 }
 \examples{
 # Requires a running broker; constructed here without connecting.
-s <- broker_audit_sink("/run/runix/audit-broker.sock")
+s <- broker_audit_sink("/run/runix-audit.sock")
 s$kind
 }

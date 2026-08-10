@@ -311,10 +311,10 @@
 #'   \code{socket_path}.
 #' @examples
 #' # Requires a running broker; constructed here without connecting.
-#' s <- broker_audit_sink("/run/runix/audit-broker.sock")
+#' s <- broker_audit_sink("/run/runix-audit.sock")
 #' s$kind
 #' @export
-broker_audit_sink <- function(socket_path = "/run/runix/audit-broker.sock",
+broker_audit_sink <- function(socket_path = "/run/runix-audit.sock",
                               connect_ms = 2000L, recv_ms = 5000L,
                               send_ms = 5000L) {
     .broker_audit_sink(socket_path, connect_ms, recv_ms, send_ms,

@@ -14,9 +14,6 @@ jobs:
   # round-trips actually run -- not just the schema fixtures.
   linux:
     runs-on: ubuntu-latest
-    env:
-      # secrets cannot be referenced in `if:` directly; hoist to an env flag
-      HAS_BROKER_TOKEN: ${{ secrets.RUNIX_BROKER_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -31,17 +28,14 @@ jobs:
       - name: R dependencies
         run: ./run.sh install_deps
 
-      # The broker daemon lives in a sibling repo. The real-broker leg needs a
-      # checkout of it; if RUNIX_BROKER_TOKEN is set it is built and the live
-      # tests run, otherwise only the hostile fake-responder tests run (they
-      # need no daemon). Set the secret (a read token for the broker repo, or
-      # make that repo public) to arm the real-broker leg -- see gate 4.
-      - name: Build the broker daemon
-        if: ${{ env.HAS_BROKER_TOKEN == 'true' }}
+      # The broker daemon lives in the PUBLIC sibling repo. Building it is
+      # mandatory (not skippable): the live-broker round-trips are part of the
+      # Linux contract. Track its feature branch until PR #1 merges, then pin a
+      # tag/commit.
+      - name: Build the broker daemon (public sibling repo)
         run: |
-          git clone --depth 1 \
-            https://x-access-token:${{ secrets.RUNIX_BROKER_TOKEN }}@github.com/cornball-ai/runix-audit-broker.git \
-            "${RUNNER_TEMP}/rab"
+          git clone --depth 1 --branch feature/broker-skeleton \
+            https://github.com/cornball-ai/runix-audit-broker.git "${RUNNER_TEMP}/rab"
           make -C "${RUNNER_TEMP}/rab"
           echo "RUNIX_TEST_BROKER_BIN=${RUNNER_TEMP}/rab/audit-broker" >> "$GITHUB_ENV"
 
@@ -128,3 +122,51 @@ jobs:
           f <- file_audit_sink(tempfile(fileext = ".jsonl"), durability = "fsync")
           stopifnot(isTRUE(f$emit(list(outcome = "ok"), "outcome")$persisted))
           cat("macOS fsync OK\n")
+
+  # The VM gate. GitHub's Ubuntu runner is an ephemeral VM with systemd and an
+  # unprivileged user holding passwordless sudo -- exactly what this needs.
+  # Proves the whole production chain: an unprivileged R client -> the root,
+  # socket-activated broker daemon (installed from its .deb) -> a root-owned
+  # durable SYSTEM record, across a broker restart between intent and outcome,
+  # with the record carrying the unprivileged caller's kernel identity; and that
+  # the unavailable/untrusted paths never advertise system durability.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prove systemd is the service manager
+        run: test -d /run/systemd/system
+
+      - name: Build + install the broker .deb, socket-activate it (as root)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libjansson-dev pkg-config build-essential debhelper fakeroot
+          git clone --depth 1 --branch feature/broker-skeleton \
+            https://github.com/cornball-ai/runix-audit-broker.git "${RUNNER_TEMP}/rab"
+          cd "${RUNNER_TEMP}/rab"
+          dpkg-buildpackage -us -uc -b
+          sudo dpkg -i ../runix-audit-broker_*.deb
+          sudo systemctl daemon-reload
+          sudo systemctl start runix-audit.socket
+          test -S /run/runix-audit.sock
+
+      - name: Setup r-ci
+        uses: eddelbuettel/github-actions/r-ci@master
+        with:
+          backend: RAPT
+      - name: R dependencies
+        run: ./run.sh install_deps
+      - name: Install runix
+        run: R CMD INSTALL .
+
+      - name: Unprivileged client - system-durable record across a restart
+        run: Rscript .github/integration/client.R
+
+      - name: Root-inspect the durable sink (IDs, identity, permissions)
+        run: |
+          sudo cat /var/log/runix/audit.jsonl > /tmp/rab-sink-copy.jsonl
+          sudo stat -c '%U %a' /var/log/runix/audit.jsonl > /tmp/rab-sink-perms.txt
+          export RAB_CLIENT_UID="$(id -u)"
+          Rscript .github/integration/inspect.R
