@@ -110,12 +110,22 @@ path.
   result shell. pkgstate/rsystemd/rctl all Import it and deleted their
   duplicated copies; rctl classifies retryability via the shared registry
   (no hardcoded class table).
+- **Durable audit + audit broker** (`durable-audit-contract.md`,
+  `audit-broker-contract.md`) — two-phase intent/outcome audit wired through the
+  `rsystemd` mutation verbs (error paths included); the privileged AF_UNIX audit
+  broker (`cornball-ai/runix-audit-broker`, `v0.0.1`, `.deb`) gives unprivileged
+  system-scope callers system-durable audit, advertised via `rctl capabilities`
+  from a runtime root-authenticated probe.
+- **JSON on Jansson** — the R stack's external JSON parsing/serialization
+  consolidated onto the `janssonr` binding (`r-cornball-janssonr`, apt-served),
+  matching the C broker's Jansson lineage: strict parsing, a documented
+  numeric-semantic contract, and exact envelope goldens.
 
 ## Open gaps (codex review 2026-08-07 + additions)
 
 Priority: **[U]** urgent, **[N]** next, **[L]** later.
 
-1. **[U] Durable audit sink.** Mutation results carry audit records, but
+1. **[done] Durable audit sink.** Mutation results carry audit records, but
    there is no durable, queryable sink (append-only, rotation, tamper
    expectations). **Addition:** mutation *errors* (timeout/cancel/failed/
    unauthorized) currently carry `observed` state but emit **no** audit
@@ -134,10 +144,13 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    caller-owned sink as an **explicit capability** — `audit_scope = "caller"`,
    `system_durable_audit = FALSE` advertised via `rctl capabilities`, fleet
    policy may refuse mutations lacking system-durable audit, never claimed as
-   the strong guarantee. **Autonomous fleet-wide system mutation stays
-   disabled by policy until the broker (gap 7) exists.** Remaining: wire the
-   sink into the rsystemd (then apt) mutation paths with caller-owned audit +
-   the capability, so effects and error paths emit records.
+   the strong guarantee. **Done (2026-08-10):** the sink is wired into the
+   rsystemd mutation paths via `audit_two_phase` (intent before the effect,
+   outcome after, error paths audited too) with caller-owned audit and the
+   `rctl capabilities` capability; and the audit broker (gap 8) now exists, so
+   an unprivileged system-scope caller obtains system-durable audit and
+   `system_durable_audit` flips true from a runtime, root-authenticated probe.
+   Remaining for the apt arc: route apt mutations through the same records.
 2. **[U] General apt authorization.** rapt authorizes only r2u-allowlisted
    (`r-*`) installs; `apt_install("curl")` needs a separate security
    design (polkit / PackageKit / a broadened or second daemon path). This
@@ -176,7 +189,7 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    foundation, but this is what makes the typed data model an operable
    control plane rather than a nicer local CLI. The `approval_required`
    resume lifecycle and durable audit (gap 1) are prerequisites.
-8. **[N] Audit broker (system-durable audit for unprivileged callers).** The
+8. **[done] Audit broker (system-durable audit for unprivileged callers).** The
    strong resolution of the authority matrix and the gate for autonomous
    fleet-wide system mutation: a small, single-purpose, credential-aware
    (`SO_PEERCRED`), append-only privileged writer that appends a caller's
@@ -196,10 +209,12 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    non-authorizing receipt binding, typed errors, disconnect never erases a
    durable intent) plus broker I/O (`O_APPEND`/`O_NOFOLLOW`, advisory lock,
    complete-write loops, `fdatasync`, parent-dir fsync) and sandboxed systemd
-   socket/service units. **Build sequence:** (2) C broker, (3) R AF_UNIX
-   client adapter (a broker-backed sink), (4) protocol/abuse tests, (5)
-   rsystemd re-integration + live unprivileged gate before advertising the
-   strong capability. The receipt-based sink interface (step 1) is done.
+   socket/service units. **Build sequence — done (2026-08-10):** (1) receipt
+   sink, (2) C broker, (3) R AF_UNIX client adapter (a broker-backed sink),
+   (4) protocol/abuse + hostile fake-responder tests, (5) rsystemd integration
+   and the live unprivileged systemd-VM gate — all merged. The strong
+   capability is advertised only from a bounded, root-authenticated runtime
+   probe.
    **Settled decisions:** AF_UNIX + socket activation for v1 (D-Bus deferred
    to when `rdbus` exists); **Jansson** for the broker parser (apt-serviced,
    native `JSON_REJECT_DUPLICATES`, which json-c cannot do). The R stack has
@@ -208,10 +223,12 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    across runix/rctl/rsystemd; the C broker and R adapter remain independent
    bindings that meet at the wire schema, cross-checked by shared fixtures.
    Repo:
-   `cornball-ai/runix-audit-broker`; the json-c-independent core (framing,
-   hardened sink, peer creds, getrandom ids/bindings) is implemented and
-   passes under ASan/UBSan (draft PR #1). Build binary/tests pending
-   `libjansson-dev`.
+   `cornball-ai/runix-audit-broker` — shipped: the daemon (framing, hardened
+   sink, peer creds, getrandom ids/bindings, ASan/UBSan-clean) is merged and
+   tagged `v0.0.1` with a `.deb`; the R adapter is folded into `runix`; the full
+   chain (unprivileged client -> root broker -> root-owned durable system record
+   across a broker restart) is proven in CI, including a systemd-VM integration
+   gate.
 
 ## Immediate sequence
 
@@ -219,20 +236,23 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    contract (done).
 2. `runix` common-core extraction — **done**: core package plus
    pkgstate/rsystemd/rctl adoption merged.
-3. **Durable audit** (covers gap 1, including error-path audit) — **contract
-   written, core sink implemented and hardened, authority matrix ratified**
-   (`durable-audit-contract.md`; sink, two-phase driver, JSON encoder in the
-   `runix` core with failure/crash-path tests). **Next: rsystemd integration
-   with caller-owned audit** — route the mutation verbs through
-   `audit_two_phase` (intent before the effect, outcome after), write to the
-   caller-owned sink, set `audit_scope`, advertise `system_durable_audit`, and
-   keep autonomous fleet system mutation policy-disabled until the broker
-   (gap 8). Foundational for trustworthy mutations.
-4. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
+3. **Durable audit** (gap 1, including error-path audit) — **done**: contract,
+   hardened core sink, two-phase driver, and the ratified authority matrix, with
+   the rsystemd mutation verbs routed through `audit_two_phase` (intent/outcome,
+   errors audited) and the audit broker (gap 8) shipped — so unprivileged
+   system-scope callers get system-durable audit and `rctl capabilities` reports
+   it from a runtime root-authenticated probe.
+4. **JSON consolidation** — **done**: the R stack's external JSON parsing and
+   serialization moved off `yyjsonr`/`jsonlite` onto the `janssonr` Jansson
+   binding (apt-installable as `r-cornball-janssonr`), matching the C broker's
+   Jansson lineage — strict parsing, a documented numeric-semantic contract,
+   exact envelope goldens, and CI on the apt binary. The durable-audit file
+   sink keeps its base-R encoder (intentional internal exception).
+5. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
    authorization + concurrency/locking + operation identity — **contract
    written** (`apt-mutation-boundary-contract.md`), a dedicated
-   pkexec/polkit-gated helper, rapt left as-is.
-5. apt mutation implementation; then gaps 4–6 incrementally.
+   pkexec/polkit-gated helper, rapt left as-is. **← next arc.**
+6. apt mutation implementation; then gaps 4–6 incrementally.
 
 ## Validation: the workflow that must be materially better
 
