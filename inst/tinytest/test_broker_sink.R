@@ -1,33 +1,42 @@
-## AF_UNIX audit-broker client sink: strict response validation (with the
-## yyjsonr duplicate-key tripwire), fail-closed behaviour with no broker, a
-## hostile fake responder (malformed frames, semantic garbage, untrusted peer,
-## deadlines), and live round-trips against the real broker binary when one is
-## provided.
+## AF_UNIX audit-broker client sink. Drives the SINGLE cross-repo fixture corpus
+## (inst/tinytest/fixtures/broker-frames/, also vendored by runix-audit-broker):
+## body fixtures through the strict validator, frame fixtures through the C
+## transport via a hostile fake responder. Plus fail-closed-with-no-broker,
+## the server-peer-not-root refusal, the anti-laundering scope downgrade, and
+## live round-trips against the real broker binary when one is provided.
 library(runix)
 
 parse_resp <- getFromNamespace(".broker_parse_response", "runix")
 
-## ---- response validator corpus (no broker needed) -----------------------
-fx <- "fixtures/broker_responses.R"
-if (!file.exists(fx)) {
-    fx <- system.file("tinytest", "fixtures", "broker_responses.R",
-                      package = "runix")
+## ---- the shared fixture corpus ------------------------------------------
+fx_dir <- "fixtures/broker-frames"
+if (!file.exists(file.path(fx_dir, "manifest.tsv"))) {
+    fx_dir <- system.file("tinytest", "fixtures", "broker-frames",
+                          package = "runix")
 }
-broker_response_fixtures <- NULL
-source(fx, local = TRUE)
-expect_true(length(broker_response_fixtures) > 0L)
-for (f in broker_response_fixtures) {
-    v <- parse_resp(f$body)
+man <- read.delim(file.path(fx_dir, "manifest.tsv"), stringsAsFactors = FALSE)
+read_fixture <- function(file) {
+    readBin(file.path(fx_dir, file), "raw",
+            n = file.info(file.path(fx_dir, file))$size)
+}
+expect_true(nrow(man) > 0L)
+
+## ---- body fixtures: the strict validator (no broker needed) --------------
+bodies <- man[man$layer == "body", , drop = FALSE]
+expect_true(nrow(bodies) > 0L)
+for (i in seq_len(nrow(bodies))) {
+    row <- bodies[i, ]
+    v <- parse_resp(read_fixture(row$file))
     accepted <- !identical(v$kind, "invalid")
-    expect_equal(accepted, isTRUE(f$accept), info = paste("fixture", f$name))
-    if (isTRUE(f$accept)) {
-        expect_equal(v$kind, f$kind, info = paste("kind", f$name))
+    expect_equal(accepted, row$accept == 1L, info = paste("body", row$name))
+    if (row$accept == 1L) {
+        expect_equal(v$kind, row$tag, info = paste("kind", row$name))
     }
-    ## the dup-key fixtures must be rejected specifically via the recursive
-    ## dup path -- the yyjsonr behavioural tripwire
-    if (isTRUE(f$dup)) {
+    ## the dup fixtures (top-level and nested) must be rejected specifically via
+    ## the recursive dup path -- the yyjsonr behavioural tripwire
+    if (identical(row$tag, "dup")) {
         expect_equal(v$reason, "duplicate or empty key",
-                     info = paste("dup tripwire", f$name))
+                     info = paste("dup tripwire", row$name))
     }
 }
 
@@ -47,31 +56,32 @@ e0 <- s0$emit(list(operation = "x", outcome = "preview", effect_issued = FALSE),
 expect_false(isTRUE(e0$persisted))
 expect_equal(e0$error, "runix_broker_unavailable")
 ## a wrong emit phase is rejected LOCALLY, before any transport
-ep <- s0$emit(list(operation = "x", outcome = "ok"), "outcome")
-expect_false(isTRUE(ep$persisted))
-expect_equal(ep$error, "runix_broker_bad_phase")
-ep2 <- s0$emit(list(operation = "x", outcome = "intent"), "intent")
-expect_equal(ep2$error, "runix_broker_bad_phase")
+expect_equal(s0$emit(list(operation = "x", outcome = "ok"), "outcome")$error,
+             "runix_broker_bad_phase")
+expect_equal(s0$emit(list(operation = "x"), "intent")$error,
+             "runix_broker_bad_phase")
 ## no-binding guard: refuse before any transport
-nb <- s0$write_outcome(list(binding = NA_character_), list(outcome = "ok"))
-expect_equal(nb$error, "runix_broker_no_binding")
+expect_equal(s0$write_outcome(list(binding = NA_character_),
+                              list(outcome = "ok"))$error,
+             "runix_broker_no_binding")
 ## a non-empty binding but no broker -> unavailable (still fail-closed)
-wo <- s0$write_outcome(list(binding = "deadbeef"), list(outcome = "ok"))
-expect_equal(wo$error, "runix_broker_unavailable")
+expect_equal(s0$write_outcome(list(binding = "deadbeef"),
+                              list(outcome = "ok"))$error,
+             "runix_broker_unavailable")
 ## defensive .Call validation errors on misuse (bad types / NA / negative)
 expect_error(runix:::.broker_call(NA_character_, "{}"), "non-NA string")
 expect_error(runix:::.broker_call(tempfile(), "{}", connect_ms = -1L),
              "non-negative")
 
 ## ---- hostile fake responder (Linux + parallel only) ---------------------
-## Every byte on the wire is controlled by the test: the client must fail
-## closed against malformed frames, semantic garbage in valid frames, an
-## unprivileged (non-root) peer, a silent server, and an immediate close.
+## Every byte on the wire is a corpus frame fixture or a corpus body wrapped in
+## a frame: the client must fail closed against malformed frames, semantic
+## garbage in valid frames, an unprivileged (non-root) peer, and a silent
+## server, and it must never launder system scope from a non-root peer.
 is_linux <- identical(Sys.info()[["sysname"]], "Linux")
 if (tinytest::at_home() && is_linux &&
     requireNamespace("parallel", quietly = TRUE)) {
 
-    ## the test responder is inert unless explicitly enabled
     old_allow <- Sys.getenv("RUNIX_ALLOW_TEST_SERVER", unset = NA)
     Sys.setenv(RUNIX_ALLOW_TEST_SERVER = "1")
     on.exit({
@@ -84,29 +94,21 @@ if (tinytest::at_home() && is_linux &&
 
     myuid <- suppressWarnings(as.integer(system("id -u", intern = TRUE))[1])
     expect_true(is.finite(myuid))
-    ## a non-root peer never earns system scope (this uid pins itself via the
-    ## seam); root-run CI would earn "system".
     expected_scope <- if (identical(myuid, 0L)) "system" else "untrusted"
 
-    be32 <- function(n) {
-        as.raw(c(bitwAnd(bitwShiftR(n, 24L), 255L),
-                 bitwAnd(bitwShiftR(n, 16L), 255L),
-                 bitwAnd(bitwShiftR(n, 8L), 255L),
-                 bitwAnd(n, 255L)))
+    frame_of <- function(body_raw) {
+        n <- length(body_raw)
+        c(as.raw(1L),
+          as.raw(c(bitwShiftR(n, 24L), bitwAnd(bitwShiftR(n, 16L), 255L),
+                   bitwAnd(bitwShiftR(n, 8L), 255L), bitwAnd(n, 255L))),
+          body_raw)
     }
-    frame <- function(body, version = 1L) {
-        b <- charToRaw(body)
-        c(as.raw(version), be32(length(b)), b)
-    }
-    ## Run one fake-server exchange: serve `reply` bytes, drive `fn(sink)`,
-    ## return fn's value. The sink trusts THIS uid (the internal test seam)
-    ## unless `expected_uid` says otherwise.
-    exchange <- function(reply, fn, expected_uid = myuid, read_first = TRUE,
-                         delay_ms = 0L, recv_ms = 2000L) {
+    ## serve `reply` bytes verbatim, run fn(sink), return fn's value
+    exchange <- function(reply, fn, expected_uid = myuid, delay_ms = 0L,
+                         recv_ms = 2000L) {
         sock <- tempfile("fake-broker-")
         child <- parallel::mcparallel(
-            runix:::.broker_test_serve_once(sock, reply,
-                                            read_first = read_first,
+            runix:::.broker_test_serve_once(sock, reply, read_first = TRUE,
                                             delay_ms = delay_ms))
         for (i in 1:200) {
             if (file.exists(sock)) break
@@ -120,17 +122,11 @@ if (tinytest::at_home() && is_linux &&
         out
     }
     open1 <- function(s) s$open_intent(list(operation = "x", outcome = "intent"))
-    VALID_OPEN <- paste0(
-        '{"audit_scope":"system",',
-        '"binding":"c7eb72753bf700824daf45442abd39c2",',
-        '"correlation_id":"00001786382512165708-a061ec02cffe1b2b",',
-        '"ok":true,"persisted":true}')
+    valid_frame <- read_fixture("frame_valid_open.frame")
 
-    ## non-vacuity: a well-formed reply from a peer whose uid this sink expects
-    ## succeeds, so every refusal below is the guard, not a broken harness. And
-    ## it proves the anti-laundering downgrade: even a byte-perfect open_ok
-    ## claiming "system" yields an "untrusted" receipt when the peer is not root.
-    ok <- exchange(frame(VALID_OPEN), open1)
+    ## non-vacuity + anti-laundering: a byte-perfect open_ok over a peer this
+    ## sink expects succeeds, but a non-root peer NEVER earns system scope.
+    ok <- exchange(valid_frame, open1)
     expect_true(isTRUE(ok$persisted))
     expect_equal(ok$audit_scope, expected_scope)
     if (!identical(myuid, 0L)) {
@@ -138,38 +134,36 @@ if (tinytest::at_home() && is_linux &&
     }
 
     ## SERVER PEER NOT ROOT: the production sink (expected uid 0) refuses this
-    ## same valid-looking responder BEFORE sending the request -- a malicious
-    ## local socket cannot fake a persisted system record.
-    pr <- exchange(frame(VALID_OPEN), open1, expected_uid = 0L)
+    ## same valid responder BEFORE sending the request.
+    pr <- exchange(valid_frame, open1, expected_uid = 0L)
     expect_false(isTRUE(pr$persisted))
     expect_equal(pr$error, "runix_broker_untrusted_peer")
     expect_true(is.na(pr$audit_scope))
 
-    ## malformed frames
-    bad_version <- exchange(frame(VALID_OPEN, version = 2L), open1)
-    expect_equal(bad_version$error, "runix_broker_bad_response")
-    oversize <- exchange(c(as.raw(1), be32(200000L)), open1)
-    expect_equal(oversize$error, "runix_broker_bad_response")
-    truncated <- exchange(c(as.raw(1), be32(100L), charToRaw("short")), open1)
-    expect_equal(truncated$error, "runix_broker_bad_response")
-    closed_no_reply <- exchange(raw(0), open1)
-    expect_equal(closed_no_reply$error, "runix_broker_io")
+    ## every corpus FRAME fixture, through the real transport
+    frames <- man[man$layer == "frame", , drop = FALSE]
+    expect_true(nrow(frames) > 0L)
+    for (i in seq_len(nrow(frames))) {
+        row <- frames[i, ]
+        res <- exchange(read_fixture(row$file), open1)
+        if (row$accept == 1L) {
+            ## a well-formed frame whose body is open_ok -> the record persists
+            expect_true(isTRUE(res$persisted), info = paste("frame", row$name))
+        } else {
+            expect_equal(res$error, "runix_broker_bad_response",
+                         info = paste("frame", row$name))
+        }
+    }
 
-    ## semantic garbage inside a valid frame
-    scope_caller <- exchange(frame(sub("system", "caller", VALID_OPEN)), open1)
-    expect_equal(scope_caller$error, "runix_broker_bad_response")
-    nested_dup <- exchange(
-        frame('{"ok":true,"persisted":true,"x":{"a":1,"a":2}}'), open1)
-    expect_equal(nested_dup$error, "runix_broker_bad_response")
-    rogue_code <- exchange(
-        frame('{"error":"made_up_code","message":"x","ok":false}'), open1)
-    expect_equal(rogue_code$error, "runix_broker_bad_response")
+    ## semantic garbage inside a valid FRAME survives the wire and is refused:
+    ## wrap a shape-valid-but-wrong-scope body in a real frame.
+    sem <- exchange(frame_of(read_fixture("scope_not_system.json")), open1)
+    expect_equal(sem$error, "runix_broker_bad_response")
 
-    ## deadline behaviour: a server that accepts, reads, and stays silent past
-    ## the recv deadline is a typed timeout, within the bound. Timed around the
-    ## CLIENT call only (the harness afterwards waits out the server child).
+    ## deadline behaviour: a server that reads then stays silent past the recv
+    ## deadline is a typed timeout, within the bound (time the client call only)
     took <- NA_real_
-    silent <- exchange(frame(VALID_OPEN), function(s) {
+    silent <- exchange(valid_frame, function(s) {
         t0 <- Sys.time()
         out <- open1(s)
         took <<- as.numeric(difftime(Sys.time(), t0, units = "secs"))
@@ -189,7 +183,7 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
     sink <- file.path(dir, "audit.jsonl")
     myuid <- suppressWarnings(as.integer(system("id -u", intern = TRUE))[1])
     ## the test broker runs as this (typically non-root) uid, so its sink is
-    ## scoped "untrusted"; a root broker (root-run CI, or the VM gate) is "system".
+    ## scoped "untrusted"; a root broker (root-run CI, the VM gate) is "system".
     expected_scope <- if (identical(myuid, 0L)) "system" else "untrusted"
 
     launch <- function() {
@@ -215,13 +209,12 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
     }, add = TRUE)
     expect_true(file.exists(sock))
 
-    ## the test broker runs unprivileged, so the internal seam pins ITS uid;
-    ## the public constructor (root-only) is exercised by the fake-responder
-    ## peer test above and the VM gate.
+    ## the test broker runs unprivileged, so the internal seam pins ITS uid; the
+    ## public root-only constructor is exercised by the peer test above + the VM
+    ## gate. A non-root peer is scoped "untrusted", never "system".
     s <- runix:::.broker_audit_sink(sock, connect_ms = 2000L, recv_ms = 5000L,
                                     send_ms = 5000L, expected_peer_uid = myuid)
 
-    ## happy path: open_intent -> write_outcome, system-durable
     r <- s$open_intent(list(operation = "svc.restart", outcome = "intent"))
     expect_true(isTRUE(r$persisted))
     expect_equal(r$audit_scope, expected_scope)
@@ -231,7 +224,6 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
                                   effect_issued = TRUE))
     expect_true(isTRUE(st$persisted))
 
-    ## emit: a single non-effect record, minted id, no binding
     e <- s$emit(list(operation = "svc.restart", outcome = "preview",
                      effect_issued = FALSE), "preview")
     expect_true(isTRUE(e$persisted))
@@ -271,7 +263,6 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
         cres <- parallel::mccollect(child)[[1]]
         expect_false(isTRUE(cres$persisted))
         expect_equal(cres$error, "actor_mismatch")
-        ## and the true opener still can close it
         expect_true(isTRUE(s$write_outcome(r3,
             list(operation = "svc.restart", outcome = "ok",
                  effect_issued = TRUE))$persisted))
