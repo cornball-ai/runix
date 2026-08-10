@@ -192,15 +192,26 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory",
         dir.create(dir, recursive = TRUE, mode = dir_mode)
         Sys.chmod(dir, mode = dir_mode, use_umask = FALSE)
     }
+    ## Unix permission bits (umask, chmod, the world-writable guard below) are a
+    ## POSIX hardening. On Windows they are ineffective and misleading: Sys.umask
+    ## is a no-op, file access is ACL-based, and file.info()$mode is a synthesised
+    ## value (typically 0666) that Sys.chmod cannot change -- so the guard would
+    ## reject every file. Apply the mode hardening on POSIX only; the symlink
+    ## refusal (meaningful everywhere) always runs.
+    posix <- .Platform$OS.type != "windows"
     if (!file.exists(path)) {
-        old <- Sys.umask("0077")
-        on.exit(Sys.umask(old), add = TRUE)
+        if (posix) {
+            old <- Sys.umask("0077")
+            on.exit(Sys.umask(old), add = TRUE)
+        }
         if (!file.create(path, showWarnings = FALSE)) {
             runix_abort(paste0("cannot create audit sink: ", path),
                         subclass = "runix_audit_error",
                         data = list(resource = path))
         }
-        Sys.chmod(path, mode = file_mode, use_umask = FALSE)
+        if (posix) {
+            Sys.chmod(path, mode = file_mode, use_umask = FALSE)
+        }
         created <- TRUE
     }
     if (nzchar(Sys.readlink(path))) {
@@ -208,12 +219,14 @@ memory_audit_sink <- function(fail_on = NULL, durability = "memory",
                     subclass = "runix_audit_error",
                     data = list(resource = path))
     }
-    mode <- file.info(path)$mode
-    if (!is.na(mode) && bitwAnd(as.integer(mode), 2L) != 0L) {
-        runix_abort(paste0("audit sink is world-writable, refusing to write: ",
-                           path),
-                    subclass = "runix_audit_error",
-                    data = list(resource = path))
+    if (posix) {
+        mode <- file.info(path)$mode
+        if (!is.na(mode) && bitwAnd(as.integer(mode), 2L) != 0L) {
+            runix_abort(paste0("audit sink is world-writable, refusing to write:",
+                               " ", path),
+                        subclass = "runix_audit_error",
+                        data = list(resource = path))
+        }
     }
     created
 }
