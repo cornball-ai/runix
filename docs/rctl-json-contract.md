@@ -113,14 +113,19 @@ retry-the-call).
   object key order is not significant.
 - Integers and doubles → JSON numbers, never scientific notation, never
   locale-formatted. Logicals → `true`/`false`.
-- **Numeric lexical form** (decided 2026-08-07): backend-specific but
-  deterministic. The encoder is yyjsonr (minimum tested version pinned in
-  rctl's DESCRIPTION, currently 0.1.22), which writes whole doubles
-  type-faithfully with a `.0` marker (`22671360.0`) and integers bare
-  (`42`); whole doubles ≥ 1e15 pass through rctl's validated integer
-  token and emit bare and exact. Agent consumers MUST compare parsed
-  JSON semantics, not raw bytes — the byte-level launcher-parity test is
-  an rctl-internal invariant (same binary, both launchers), not a
+- **Numeric lexical form** (decided 2026-08-07; encoder changed to
+  janssonr 2026-08-10): backend-specific but deterministic. The encoder is
+  janssonr (the R Jansson binding, minimum tested version pinned in rctl's
+  DESCRIPTION, currently 0.0.1.1), which writes a whole double losslessly
+  as a bare integer literal (`22671360`, no `.0`), a fractional double as
+  itself (`0.5`), and integers bare (`42`); a whole double ≥ 1e15 emits bare
+  and exact, and one that cannot round-trip (≥ 2^53 or non-integral) is
+  refused rather than corrupted. JSON has a single numeric type, so
+  **numeric semantics — not lexical spelling — are contractual**, and
+  `schema_version` stays `1` across this spelling change (the earlier yyjsonr
+  encoder wrote whole doubles as `22671360.0`). Agent consumers MUST compare
+  parsed JSON semantics, not raw bytes — the byte-level launcher-parity test
+  is an rctl-internal invariant (same binary, both launchers), not a
   cross-version stability promise for numeric spellings.
 - Strings are always valid UTF-8. Fields that originate as byte arrays
   (journal messages) are converted at the R API layer; rctl must never
