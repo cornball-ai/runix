@@ -137,15 +137,17 @@ broker-minted id in the receipt (with the opaque `binding`), and whose
 `audit_two_phase` or the consumers; only the sink differs.
 
 **The R client parses responses too.** The broker is not the only parse
-boundary: the R adapter parses the broker's response frames (with yyjsonr,
-not jansson). The response is trusted local IPC, but the adapter must still
-enforce the same frame limits (version, hard length cap) and an **exact
+boundary: the R adapter parses the broker's response frames (with janssonr,
+the R Jansson binding). The response is trusted local IPC, but the adapter must
+still enforce the same frame limits (version, hard length cap) and an **exact
 response schema** (known fields, correct types), and fail closed on anything
-else. Because the two sides use different JSON libraries, the protection is
-**cross-library conformance tests**: shared fixtures (valid and malformed
-frames, edge-case records) run through both the jansson broker and the
-yyjsonr adapter, asserting identical accept/reject decisions. A shared
-implementation is explicitly not the mechanism.
+else. Both sides now sit on the Jansson library, but through independent
+bindings with different profiles -- the broker's direct C use and janssonr's
+strict R-safe RFC-8259 (which refuses duplicate keys at any depth, trailing
+content, and >2^53 integer literals). So the protection stays **conformance
+tests**: shared fixtures (valid and malformed frames, edge-case records) run
+through both the C broker and the janssonr adapter, asserting identical
+accept/reject decisions. A shared implementation is explicitly not the mechanism.
 
 ## Wire protocol (pinned before implementation)
 
@@ -408,10 +410,10 @@ Protocol and abuse tests (a lying or hostile client):
 20. **Client-side response validation** — the R adapter rejects a response
     frame that violates the version/length limits or the exact response
     schema, and fails closed rather than trusting a malformed reply.
-21. **Cross-library conformance** — shared fixtures (valid and malformed
+21. **Cross-binding conformance** — shared fixtures (valid and malformed
     frames, edge-case records) produce identical accept/reject decisions
-    through the jansson broker and the yyjsonr adapter; the two independent
-    parsers agree on the wire schema.
+    through the C broker and the janssonr adapter; the two independent Jansson
+    bindings agree on the wire schema.
 
 Durable-state reconstruction and rotation:
 

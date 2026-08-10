@@ -55,7 +55,7 @@ Two qualifications:
 
 This repository is both the **`runix` common-core package** (near-zero-dependency
 shared spine: typed conditions, retryability registry, injectable-runner
-machinery, neutral result object; its one Imports is `yyjsonr`, for strict JSON)
+machinery, neutral result object; its one Imports is `janssonr`, for strict JSON)
 and the project umbrella (architecture
 docs, integration tests, deployment). The package builds from the repo root;
 `docs/`, `integration-tests/`, and `deploy/` are `.Rbuildignore`d.
@@ -73,7 +73,7 @@ docs, integration tests, deployment). The package builds from the repo root;
 
 | Package | Scope | Status |
 |---|---|---|
-| runix (this repo) | near-zero-dep common core (one Imports, yyjsonr): conditions, retryability, runner, result | experimental |
+| runix (this repo) | near-zero-dep common core (one Imports, janssonr): conditions, retryability, runner, result | experimental |
 | [pkgstate](https://github.com/cornball-ai/pkgstate) | dpkg/apt read-only introspection | experimental |
 | [rsystemd](https://github.com/cornball-ai/rsystemd) | systemd introspection + managed mutation | experimental |
 | [rctl](https://github.com/cornball-ai/rctl) | machine-drivable CLI over the subsystems | experimental |

@@ -68,16 +68,16 @@
 broker_available <- function(socket_path = "/run/runix-audit.sock",
                              connect_ms = 500L) {
     st <- .broker_probe(socket_path, 0L, connect_ms)
-    switch(as.character(as.integer(st)),
-           "0" = "available", "1" = "unavailable", "2" = "timeout",
-           "6" = "untrusted", "5" = "unsupported", "error")
+    switch(as.character(as.integer(st)), "0" = "available",
+           "1" = "unavailable", "2" = "timeout", "6" = "untrusted",
+           "5" = "unsupported", "error")
 }
 
 ## Map a non-OK transport status to a typed, binding-free error code.
 .broker_status_error <- function(status) {
     switch(as.character(as.integer(status)),
-           "1" = "runix_broker_unavailable",  # no socket / refused
-           "5" = "runix_broker_unavailable",  # the client is Linux-only
+           "1" = "runix_broker_unavailable", # no socket / refused
+           "5" = "runix_broker_unavailable", # the client is Linux-only
            "2" = "runix_broker_timeout",
            "3" = "runix_broker_bad_response",
            "4" = "runix_broker_io",
@@ -89,23 +89,23 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 ##
 ## The response is trusted local IPC from an authenticated root peer, but the
 ## adapter still validates it exactly (audit-broker-contract.md): a closed key
-## set per shape, correct scalar types, documented value formats, and recursive
-## duplicate-key rejection. yyjsonr has no duplicate-key read flag, but it
-## PRESERVES duplicates as repeated names, so a recursive walk detects them;
-## that behaviour is pinned by a fixture (one top-level, one nested).
+## set per shape, correct scalar types, and documented value formats. Duplicate
+## keys are rejected by janssonr's parser itself -- it refuses them at any depth
+## as a janssonr_parse_error -- so a malformed response never reaches the shape
+## checks; a fixture pins that rejection (one top-level, one nested).
 
 .BROKER_SHAPES <- list(
-    outcome_ok = c("ok", "persisted"),
-    emit_ok    = c("audit_scope", "correlation_id", "ok", "persisted"),
-    open_ok    = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
-    error      = c("error", "message", "ok"))
+                       outcome_ok = c("ok", "persisted"),
+                       emit_ok = c("audit_scope", "correlation_id", "ok", "persisted"),
+                       open_ok = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
+                       error = c("error", "message", "ok"))
 
 ## The broker's closed error-code set (PROTOCOL.md). Anything else in an error
 ## response is itself a malformed response.
 .BROKER_ERROR_CODES <- c("bad_frame", "too_large", "bad_json",
-                         "unknown_request", "schema_invalid", "unknown_intent",
-                         "actor_mismatch", "rate_limited", "persist_failed",
-                         "internal")
+                         "unknown_request", "schema_invalid",
+                         "unknown_intent", "actor_mismatch", "rate_limited",
+                         "persist_failed", "internal")
 
 ## Documented value formats: a correlation id is a 20-digit microsecond
 ## timestamp, a dash, and 16 hex chars; a binding is exactly 32 hex chars.
@@ -115,22 +115,6 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 .broker_is_str <- function(x) is.character(x) && length(x) == 1L && !is.na(x)
 .broker_is_true <- function(x) is.logical(x) && length(x) == 1L && isTRUE(x)
 .broker_is_bool <- function(x) is.logical(x) && length(x) == 1L && !is.na(x)
-
-## Recursively reject any decoded object with a duplicate or empty key.
-.broker_has_bad_keys <- function(x) {
-    if (is.list(x)) {
-        nm <- names(x)
-        if (!is.null(nm) && (anyDuplicated(nm) != 0L || any(!nzchar(nm)))) {
-            return(TRUE)
-        }
-        for (el in x) {
-            if (.broker_has_bad_keys(el)) {
-                return(TRUE)
-            }
-        }
-    }
-    FALSE
-}
 
 ## Parse + strictly validate a response body (raw or character). Returns
 ## list(kind = <shape>|"invalid", fields = <parsed>, reason = <chr>).
@@ -143,15 +127,16 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     if (length(txt) != 1L || is.na(txt)) {
         return(list(kind = "invalid", reason = "unreadable body"))
     }
-    parsed <- tryCatch(yyjsonr::read_json_str(txt), error = function(e) e)
+    ## janssonr parses strictly: it refuses duplicate keys (at any depth),
+    ## trailing content, and bad UTF-8 as a classed condition. A refusal is a
+    ## malformed response from the authenticated peer -> "invalid", which the
+    ## caller maps to runix_broker_bad_response, never "unavailable".
+    parsed <- tryCatch(janssonr::from_json(txt), error = function(e) e)
     if (inherits(parsed, "condition")) {
         return(list(kind = "invalid", reason = "parse error"))
     }
     if (!is.list(parsed) || is.null(names(parsed))) {
         return(list(kind = "invalid", reason = "not a JSON object"))
-    }
-    if (.broker_has_bad_keys(parsed)) {
-        return(list(kind = "invalid", reason = "duplicate or empty key"))
     }
     nm <- names(parsed)
     if (!("ok" %in% nm) || !.broker_is_bool(parsed$ok)) {
@@ -180,11 +165,12 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
             ## malformed response, not a different flavour of success.
             if (!.broker_is_str(parsed$audit_scope) ||
                 !identical(parsed$audit_scope, "system")) {
-                return(list(kind = "invalid", reason = "audit_scope not system"))
+                return(list(kind = "invalid",
+                            reason = "audit_scope not system"))
             }
             if (identical(kind, "open_ok") &&
                 (!.broker_is_str(parsed$binding) ||
-                 !grepl(.BROKER_BINDING_RE, parsed$binding))) {
+                    !grepl(.BROKER_BINDING_RE, parsed$binding))) {
                 return(list(kind = "invalid", reason = "bad binding"))
             }
         }
@@ -231,7 +217,11 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     trusted <- identical(expected_peer_uid, 0L)
     ## the ONLY scope this sink may claim; root-peer sinks earn "system",
     ## everything else is downgraded regardless of the wire response.
-    claimed_scope <- if (trusted) "system" else "untrusted"
+    if (trusted) {
+        claimed_scope <- "system"
+    } else {
+        claimed_scope <- "untrusted"
+    }
 
     ## Encode + send a request; return a validated response or a typed failure.
     call <- function(req) {
@@ -239,8 +229,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         if (inherits(body, "condition")) {
             return(list(kind = "invalid", error = "runix_broker_bad_request"))
         }
-        res <- .broker_call(socket_path, body, connect_ms, recv_ms, send_ms,
-                            expected_peer_uid)
+        res <- .broker_call(socket_path, body, connect_ms, recv_ms,
+                            send_ms, expected_peer_uid)
         if (!identical(as.integer(res$status), .RAB_ST_OK)) {
             return(list(kind = "transport",
                         error = .broker_status_error(res$status)))
@@ -273,7 +263,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 
     write_outcome <- function(receipt, record) {
         bind <- receipt$binding
-        if (is.null(bind) || length(bind) != 1L || is.na(bind) || !nzchar(bind)) {
+        if (is.null(bind) || length(bind) != 1L || is.na(bind) ||
+            !nzchar(bind)) {
             return(list(persisted = FALSE, error = "runix_broker_no_binding"))
         }
         v <- call(list(type = "write_outcome", binding = bind, record = record))
@@ -288,7 +279,7 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         ## Rejected here, locally, so a wrong phase never even reaches the
         ## wire. The broker mints ids; a caller-supplied id is ignored.
         if (!(is.character(phase) && length(phase) == 1L &&
-              phase %in% c("preview", "noop"))) {
+                phase %in% c("preview", "noop"))) {
             return(fail_receipt("runix_broker_bad_phase"))
         }
         v <- call(list(type = "emit", phase = phase, record = record))

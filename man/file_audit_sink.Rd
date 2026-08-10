@@ -43,7 +43,7 @@ then reports persisted), \code{"flush"} (flush to the OS, no fsync), or
 considered stale and stolen.}
 
 \item{encoder}{\code{function(record)} returning one JSON line (default
-\code{\link{encode_json_line}}; inject \code{yyjsonr} etc. if desired).}
+\code{\link{encode_json_line}}; inject \code{janssonr} etc. if desired).}
 
 \item{syncer}{\code{function(path)} that fsyncs the file, erroring on
 failure (default shells to coreutils \code{sync --data}).}

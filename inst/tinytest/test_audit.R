@@ -164,8 +164,8 @@ gp <- file.path(td, "gap.jsonl")
 gs <- file_audit_sink(gp, durability = "none")
 gs$write(list(schema_version = 1L, correlation_id = "cid-crash",
               phase = "intent", operation = "z"))
-if (requireNamespace("jsonlite", quietly = TRUE)) {
-    recs3 <- lapply(readLines(gp, warn = FALSE), jsonlite::fromJSON)
+if (requireNamespace("janssonr", quietly = TRUE)) {
+    recs3 <- lapply(readLines(gp, warn = FALSE), janssonr::from_json)
     intents <- Filter(function(r) identical(r$phase, "intent"), recs3)
     outcomes <- Filter(function(r) identical(r$phase, "outcome"), recs3)
     open_ids <- setdiff(
@@ -266,8 +266,8 @@ if (at_home() && nzchar(Sys.which("r"))) {
     got <- readLines(cp, warn = FALSE)
     expect_equal(length(got), 90L)                    # nothing lost
     expect_true(all(grepl("^\\{.*\\}$", got)))        # no torn/interleaved lines
-    if (requireNamespace("jsonlite", quietly = TRUE)) {
-        expect_silent(lapply(got, jsonlite::fromJSON))  # every line parses
+    if (requireNamespace("janssonr", quietly = TRUE)) {
+        expect_silent(lapply(got, janssonr::from_json))  # every line parses
     }
 }
 

@@ -25,6 +25,14 @@ jobs:
       - name: System build deps (for the broker daemon)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjansson-dev pkg-config build-essential
 
+      # janssonr (runix's one Import) is not on CRAN/r2u; install the versioned
+      # source tarball from the cornball drat. download.packages + R CMD INSTALL
+      # bypasses the RAPT install.packages shim and pins to the drat's version.
+      - name: Install janssonr from the cornball drat (source)
+        run: |
+          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
+          R CMD INSTALL janssonr_*.tar.gz
+
       - name: R dependencies
         run: ./run.sh install_deps
 
@@ -67,9 +75,18 @@ jobs:
         with:
           use-public-rspm: true
 
-      - uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          extra-packages: any::tinytest
+      # runix Imports janssonr on every platform (the broker sink parser uses it,
+      # even where the transport is the compiled stub). Off Linux it builds from
+      # source against Homebrew's jansson; pull the versioned tarball from the
+      # drat. tinytest comes from the default repo. We install both directly
+      # rather than via setup-r-dependencies: pak's solver does not resolve the
+      # drat-only janssonr, and these are the package's only dep + test dep.
+      - name: libjansson (brew) + janssonr from the cornball drat + tinytest
+        run: |
+          brew install jansson
+          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
+          R CMD INSTALL janssonr_*.tar.gz
+          Rscript -e 'install.packages("tinytest")'
 
       # bash so `R CMD INSTALL` runs the same everywhere (the Windows runner's
       # default shell is PowerShell, which mis-parses `R CMD INSTALL .`)
@@ -157,6 +174,10 @@ jobs:
         uses: eddelbuettel/github-actions/r-ci@master
         with:
           backend: RAPT
+      - name: Install janssonr from the cornball drat (source)
+        run: |
+          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
+          R CMD INSTALL janssonr_*.tar.gz
       - name: R dependencies
         run: ./run.sh install_deps
       - name: Install runix

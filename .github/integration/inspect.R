@@ -12,7 +12,7 @@ stopifnot(nzchar(cid), is.finite(uid))
 lines <- readLines("/tmp/rab-sink-copy.jsonl", warn = FALSE)
 recs <- Filter(Negate(is.null),
                lapply(lines, function(l) {
-                   tryCatch(yyjsonr::read_json_str(l), error = function(e) NULL)
+                   tryCatch(janssonr::from_json(l), error = function(e) NULL)
                }))
 mine <- Filter(function(r) identical(r$record_type, "audit") &&
                    identical(r$correlation_id, cid), recs)

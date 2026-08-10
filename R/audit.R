@@ -65,9 +65,8 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
 ## `record_type` distinguishes a user-visible audit event from a sink's internal
 ## records (e.g. the broker's checkpoints); see durable-audit-contract.md.
 .finish_record <- function(rec, cid, phase, time) {
-    c(list(schema_version = 1L, record_type = "audit",
-            correlation_id = cid, phase = phase,
-            host = .nodename(), pid = Sys.getpid()),
+    c(list(schema_version = 1L, record_type = "audit", correlation_id = cid,
+            phase = phase, host = .nodename(), pid = Sys.getpid()),
         rec,
         list(time = time))
 }

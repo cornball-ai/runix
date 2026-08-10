@@ -1,8 +1,8 @@
 Package: runix
 Type: Package
 Title: Common Core for the Runix System-Administration Framework
-Version: 0.0.1.6
-Date: 2026-08-09
+Version: 0.0.1.7
+Date: 2026-08-10
 Authors@R: c(
     person("Troy", "Hernandez", role = c("aut", "cre"), email = "troy@cornball.ai",
            comment = c(ORCID = "0009-0005-4248-604X")),
@@ -15,20 +15,22 @@ Description: The near-zero-dependency common core shared by the Runix subsystem
     JSONL with two-phase intent/outcome correlation, advisory locking, fsync,
     rotation, and honest persistence reporting), and the AF_UNIX client for the
     privileged audit broker. Subsystem packages ('pkgstate', 'rsystemd', ...)
-    import this; it never imports them, and its only dependency is 'yyjsonr'
-    for strict validation of broker responses. This is a Unix package (it
+    import this; it never imports them, and its only dependency is 'janssonr'
+    for strict parsing and validation of broker responses (the Jansson library
+    the broker daemon itself uses). This is a Unix package (it
     administers a Linux host); the broker client is Linux-only, returning a
     typed 'runix_broker_unavailable' on other Unix platforms where
     system-durable audit is reported absent, while the core, memory sink, and
     portable file-sink guarantees remain available.
 License: MIT + file LICENSE
 OS_type: unix
-Imports: yyjsonr
+Imports: janssonr (>= 0.0.1.1)
+Additional_repositories: https://cornball-ai.github.io/drat
 SystemRequirements: coreutils 'sync' (for fsync/fdatasync of the audit sink
     and its parent directory); Linux procfs '/proc' for audit lock-owner
     liveness, boot id, and process start time (absent elsewhere, lock
     staleness degrades to an mtime timeout); the audit broker client uses
     AF_UNIX and is Linux-only (absent elsewhere).
-Suggests: tinytest, jsonlite
+Suggests: tinytest
 Encoding: UTF-8
 Config/roxygen2/version: 8.0.0
