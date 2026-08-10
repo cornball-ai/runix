@@ -78,10 +78,18 @@ weaker guarantee is explicitly accepted and advertised as such (its own
    framed (length-prefixed); each record is validated against the durable-audit
    schema and a size cap before any write. Malformed or oversize requests are
    rejected, not written.
-7. **Rate limits and quotas.** Per-actor rate limits and total quotas resist
-   log-filling attacks (an unprivileged caller flooding the root sink to
-   exhaust disk or drown real records). Rejection is explicit and itself
-   auditable in aggregate.
+7. **Rate limits and write-byte quotas.** Three separate controls resist
+   log-filling attacks (an unprivileged caller flooding the root sink to exhaust
+   disk or drown real records), each rejecting with `rate_limited` before any
+   append: a **per-uid op-count** limit (records/uid/window), a **per-uid
+   write-byte** quota (appended bytes/uid/window), and a **global write-byte**
+   quota (appended bytes/window across all uids). The op-count limit alone is
+   insufficient — at its cap a caller can still write that many maximum-size
+   frames — so the per-uid byte quota is required, not optional. These are
+   **distinct from retention** (req. in the durable-state section): the op-count
+   and byte quotas bound what a caller may *write*; retention bounds what is kept
+   *on disk*. One is not a substitute for another. Rejection is explicit and
+   itself auditable in aggregate.
 8. **Atomic append and fsync via the hardened sink.** The broker performs the
    actual write through the runix hardened file sink: whole-line `O_APPEND`,
    advisory lock, file fsync, parent-directory fsync on create/rotation,
@@ -98,10 +106,12 @@ weaker guarantee is explicitly accepted and advertised as such (its own
     must not be able to monopolize the broker by holding a connection open. The
     broker enforces an **absolute** receive deadline for a whole request frame
     (a monotonic wall-clock budget, *not* a per-byte timeout that a dripped
-    byte can reset), a bounded response-write deadline, a cap on simultaneous
-    and pending connections, and per-uid connection-attempt limiting. A
-    connection that misses a deadline is closed and does not block others. This
-    is what makes the serialized single-process loop (below) safe.
+    byte can reset), a bounded response-write deadline, a global and **per-uid**
+    cap on concurrent connections (so one uid cannot occupy every slot), a
+    bounded listen backlog, and per-uid connection-attempt limiting. Connections
+    are multiplexed by a non-blocking `poll(2)` reactor, so a connection that
+    misses a deadline is closed without ever delaying another. This is what makes
+    the single-process event loop (below) safe.
 
 ## Record lifecycle through the broker
 
@@ -198,23 +208,27 @@ implements a spec rather than inventing one.
 
 ## Broker I/O and packaging
 
-- **Single-process, serialized event loop.** v1 handles connections one at a
-  time in a single process. That keeps reconstructed state, the open-intent
-  set, rate accounting, and rotation strictly serialized (no cross-thread
-  locking of the durable state), which is only safe because the deadlines below
-  make monopolization impossible. A slow or hostile client cannot stall the
-  loop past its deadline.
-- **Connection deadlines and limits (anti-slowloris).** The accept loop applies
-  an **absolute monotonic deadline** to receiving each complete request frame,
+- **Single-process, non-blocking multiplexed event loop.** v1 runs one process
+  with a `poll(2)` reactor that multiplexes all connections concurrently; each
+  connection is an independent state machine (receive one request frame, then
+  send one response). The durable state (reconstructed open-intent set, rate
+  accounting, rotation) is still mutated strictly serially — only the network
+  I/O is multiplexed — so there is no cross-thread locking of the durable state.
+  Because no connection can block another, a slow or hostile client cannot stall
+  the loop or delay a client waiting behind it, past its deadline.
+- **Connection deadlines and limits (anti-slowloris).** The loop applies an
+  **absolute monotonic deadline** to receiving each complete request frame,
   computed once when the connection is accepted and enforced across every
   partial read (a client that drips one byte at a time still hits the same
   wall-clock deadline — the budget is never reset by progress). A separate
-  bounded deadline caps the response write. Simultaneous plus pending
-  connections are capped (a bounded listen backlog and an accepted-connection
-  cap), and per-uid connection attempts are rate-limited from broker-assigned
-  timestamps. Deadlines are enforced with `poll(2)` against
-  `CLOCK_MONOTONIC`-derived remaining time; a missed deadline closes just that
-  connection.
+  bounded deadline caps the response write. Concurrent accepted connections are
+  capped both globally and **per-uid** (so one uid cannot fill every slot and
+  starve others), pending connections are bounded by the listen backlog, and
+  per-uid connection attempts are rate-limited from broker-assigned timestamps.
+  Each connection buffers at most one request body (<= the 64 KiB frame maximum)
+  and one response, so memory is bounded by the connection cap. Deadlines are
+  enforced with `poll(2)` against `CLOCK_MONOTONIC`-derived remaining time; a
+  missed deadline closes just that connection.
 - **Descriptor-based, hijack-safe writes.** Open the sink once with
   `O_APPEND | O_NOFOLLOW | O_CLOEXEC` and hold the descriptor; never reopen by
   path per write. `O_NOFOLLOW` refuses a symlinked sink at open; `O_APPEND`
@@ -258,10 +272,11 @@ safe.
   the `binding`, and `broker.accepted_time_us` (string). An open intent is one
   whose correlation id has an intent record (or a `broker_checkpoint`) but no
   outcome record.
-- **Startup reconstruction:** scan the current segment (and its retained tail)
-  to rebuild the open-intent set and the per-actor rate state. Rate windows
-  are rebuilt from **broker-assigned** record timestamps, never caller-
-  supplied times.
+- **Startup reconstruction:** read **only the current segment** (archives are
+  never read) to rebuild the open-intent set and the per-actor rate state. Rate
+  windows are rebuilt from **broker-assigned** record timestamps, never caller-
+  supplied times. Reading only the current segment is precisely what obliges
+  rotation to carry both open intents and rate history forward (below).
 - **Reconstruction fails closed.** Reject and refuse to serve on: an outcome
   with no matching intent, a second outcome for an already-closed intent, or
   inconsistent duplicate intents. A torn final line (partial-tail from a crash
@@ -276,7 +291,7 @@ safe.
   open forever, block rotation). Instead, open intents are **checkpointed**
   into the new segment:
   - open intents are bounded **per-uid and globally**; opening beyond the cap
-    is a typed `rate_limited`/`too_many` error, not unbounded growth;
+    is a typed `rate_limited` error, not unbounded growth;
   - a carry-forward record is a `broker_checkpoint` `record_type` (not an audit
     `phase`, and not an ambiguous second `intent`) that retains the intent's
     `operation`/`resource`/`scope`, binding, and peer identity so an open intent
@@ -288,14 +303,47 @@ safe.
     loses an open intent;
   - the rotation swap holds the sink's advisory lock, and a post-rename fsync
     failure poisons the broker (the rename may not be durable).
-- **Rate state survives rotation.** Because reconstruction reads only the
-  current segment, the recent per-uid rate history is carried into the new
-  segment (as broker checkpoint state), so idle-exit + rotation + reconnect
-  cannot reset a caller's rate window.
-- **Archive retention.** Retired segments are bounded by a retention policy
-  (count and/or total bytes); an open intent is always checkpointed forward
-  before its originating segment can be pruned, so retention never drops a
-  still-open operation.
+- **Rate and per-uid byte state survive rotation.** Rotation writes one
+  `broker_rate` record per active uid into the new segment: for every op still
+  inside the rate window, its broker-assigned timestamp AND its appended byte
+  size (parallel `times_us` / `bytes` arrays, one-to-one). Reconstruction
+  reseeds the per-uid ring from it, so idle-exit + rotation + restart cannot
+  reset a caller's op-count rate window **or** its per-uid write-byte quota. The
+  window boundary is **inclusive**: a timestamp exactly `now - window` old still
+  counts against both limits (and is still carried); one microsecond older does
+  not.
+- **The global write-byte quota is deliberately not persisted.** Unlike the
+  per-uid quota, the global ceiling is a tumbling window reset on restart. This
+  is intentional, not an oversight: the broker only idle-exits after an idle
+  period longer than the window (so there is no in-window global state to carry),
+  and a crash-restart merely resets a deliberately coarse total-volume ceiling
+  while the per-uid quotas — which do persist — still bound every caller. A
+  per-uid write-byte quota therefore requires the op-count limit to be enabled
+  (the op ring bounds its state); that combination is validated at startup and
+  refused otherwise (fail closed).
+- **Archive retention.** Retired segments are bounded by **both** a segment
+  count and a total byte budget, and the active segment counts toward the byte
+  budget. Oldest archives are pruned first, and **only after** the new
+  checkpointed segment is durably swapped in, so an archive is never deleted
+  while an open intent's checkpoint is not yet durable. Because carry-forward
+  re-materialises every open intent as a checkpoint in the retained active
+  segment, retention can never drop a still-open operation.
+  - **Config floor.** A byte budget smaller than one segment can never be met by
+    pruning archives, so `retain_bytes` below `rotate_bytes` is rejected at
+    startup (fail closed) rather than run as an unsatisfiable bound.
+  - **Active segment is never sacrificed.** If the active segment alone exceeds
+    the byte budget (e.g. a large open-intent checkpoint set), retention prunes
+    every archive and the active segment stands; audit is never destroyed to
+    satisfy a bound.
+  - **Only broker-owned regular files.** A prune candidate must be a regular
+    file, owned by the broker, whose name is the sink base plus an all-decimal
+    rotation suffix. Symlinks are never followed and never counted, so retention
+    can never delete an unexpected path.
+  - **Deletion durability.** Pruning is followed by a parent-directory fsync;
+    its failure is non-fatal and does **not** poison the broker. A resurrected
+    archive is harmless (reconstruction never reads archives) and is re-pruned at
+    the next rotation — unlike the rotation rename, whose loss would drop an
+    acknowledged write.
 
 ## Relationship to the rest
 
@@ -377,7 +425,7 @@ Durable-state reconstruction and rotation:
     it into the new segment; reconstruction collapses duplicate carry-forwards
     to a single open intent, which is still closable afterward.
 25. **Bounded open intents** — opening beyond the per-uid or global cap is
-    rejected (`too_many`/`rate_limited`); rotation is never refused, so an
+    rejected (`rate_limited`); rotation is never refused, so an
     open intent cannot be used to exhaust disk.
 26. **Full-identity match** — an outcome from the same uid but a different pid
     or process start time (PID reuse) is rejected (`actor_mismatch`), not
@@ -409,6 +457,30 @@ Record shape and the sink-extension:
     R file sink and through the broker agrees field-for-field on the canonical
     schema (reals compared with tolerance; the broker's `broker` extension is
     broker-only).
+33. **Rotation preserves state across restart** — with a small `rotate_bytes`
+    that forces the rate-seeding audit records into archives, a restart still
+    finds every open intent (via checkpoints) **and** the per-uid rate limit
+    still holds (via `broker_rate`). The rate-window boundary is inclusive: an
+    op at exactly `now - window` counts, one microsecond older does not.
+34. **Retention bounds, active included** — retention holds the on-disk total
+    within both the segment count and the byte budget (the active segment
+    counted); `retain_bytes < rotate_bytes` is rejected at startup; and when the
+    active segment alone exceeds the budget, every archive is pruned while the
+    unresolved intents survive and stay closable.
+35. **Retention path safety** — only broker-owned regular segment files are
+    pruned; an archive-named symlink is neither followed nor deleted and its
+    target is untouched.
+36. **Fair multiplexing** — while one uid holds several slow (incomplete-frame)
+    connections, a second client's complete request is served within its
+    deadline, not queued behind the slow connections' deadlines; and a
+    connection beyond the per-uid concurrency cap is dropped.
+37. **Write-byte quotas** — with the op-count limit set high, a per-uid flood is
+    stopped by the per-uid byte quota (a second uid is unaffected, and the
+    window slides open after it elapses); a cross-uid flood is stopped by the
+    global byte quota (which rolls over on the next window). The per-uid byte
+    quota survives rotation + restart via `broker_rate` and then ages out; a
+    per-uid byte quota configured without the op-count limit is refused at
+    startup.
 
 ## Packaging and activation gate (CI)
 

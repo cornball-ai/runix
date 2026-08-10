@@ -155,7 +155,7 @@ canonical value (name resolution is unstable and sink-dependent). This
 supersedes the earlier `name(uid)` form — a pre-release normalization so all
 sinks (local file, memory, broker) emit the identical actor representation.
 
-## Sink-extension records (the `broker` object and `broker_checkpoint`)
+## Sink-extension records (the `broker` object, `broker_checkpoint`, `broker_rate`)
 
 A sink that maintains durable state of its own (the audit broker,
 `audit-broker-contract.md`) records that state **in the same JSONL file** — one
@@ -203,6 +203,30 @@ shape and still reject unrelated unknown fields.
   skip `broker_checkpoint` lines; broker reconstruction consumes them
   idempotently (a repeated checkpoint for the same `correlation_id` collapses to
   one open intent).
+
+- **`broker_rate`** is a broker-internal `record_type`, also written during
+  rotation, that carries the per-uid rate-window history forward. Because
+  reconstruction reads only the current segment, the audit records that seeded a
+  caller's op-count rate limit and per-uid write-byte quota move out of reach
+  when they are archived; this record keeps both from resetting on the next
+  restart:
+
+  ```jsonc
+  { "record_type": "broker_rate",
+    "uid": 1000,
+    "times_us": ["1786238615572863", "1786238615572999"],  // decimal strings
+    "bytes":    ["412", "418"] }                            // appended size per op
+  ```
+
+  `times_us` holds the broker-assigned timestamps still inside the rate window at
+  rotation time (only those), and `bytes` the appended size (record + newline) of
+  each op, one-to-one with `times_us`. It carries no `broker` object and no
+  `correlation_id`: it is aggregate per-uid state, not a mutation event. Audit
+  readers skip it; broker reconstruction reseeds the per-uid ring (both the op
+  count and the byte sum) from it. The rate-window boundary is inclusive (a
+  timestamp exactly `now - window` old is still in-window and still carried). The
+  global write-byte quota is a separate, deliberately non-persisted tumbling
+  window and has no carry record.
 
 ## Correlation IDs
 
