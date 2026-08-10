@@ -30,11 +30,10 @@ jobs:
 
       # The broker daemon lives in the PUBLIC sibling repo. Building it is
       # mandatory (not skippable): the live-broker round-trips are part of the
-      # Linux contract. Track its feature branch until PR #1 merges, then pin a
-      # tag/commit.
+      # Linux contract. Pinned to the immutable release tag v0.0.1.
       - name: Build the broker daemon (public sibling repo)
         run: |
-          git clone --depth 1 --branch feature/broker-skeleton \
+          git clone --depth 1 --branch v0.0.1 \
             https://github.com/cornball-ai/runix-audit-broker.git "${RUNNER_TEMP}/rab"
           make -C "${RUNNER_TEMP}/rab"
           echo "RUNIX_TEST_BROKER_BIN=${RUNNER_TEMP}/rab/audit-broker" >> "$GITHUB_ENV"
@@ -145,7 +144,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libjansson-dev pkg-config build-essential debhelper fakeroot
-          git clone --depth 1 --branch feature/broker-skeleton \
+          git clone --depth 1 --branch v0.0.1 \
             https://github.com/cornball-ai/runix-audit-broker.git "${RUNNER_TEMP}/rab"
           cd "${RUNNER_TEMP}/rab"
           dpkg-buildpackage -us -uc -b
