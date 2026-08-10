@@ -291,7 +291,7 @@ safe.
   open forever, block rotation). Instead, open intents are **checkpointed**
   into the new segment:
   - open intents are bounded **per-uid and globally**; opening beyond the cap
-    is a typed `rate_limited`/`too_many` error, not unbounded growth;
+    is a typed `rate_limited` error, not unbounded growth;
   - a carry-forward record is a `broker_checkpoint` `record_type` (not an audit
     `phase`, and not an ambiguous second `intent`) that retains the intent's
     `operation`/`resource`/`scope`, binding, and peer identity so an open intent
@@ -425,7 +425,7 @@ Durable-state reconstruction and rotation:
     it into the new segment; reconstruction collapses duplicate carry-forwards
     to a single open intent, which is still closable afterward.
 25. **Bounded open intents** — opening beyond the per-uid or global cap is
-    rejected (`too_many`/`rate_limited`); rotation is never refused, so an
+    rejected (`rate_limited`); rotation is never refused, so an
     open intent cannot be used to exhaust disk.
 26. **Full-identity match** — an outcome from the same uid but a different pid
     or process start time (PID reuse) is rejected (`actor_mismatch`), not
