@@ -13,7 +13,7 @@ jobs:
   # R CMD check) so the hostile fake-responder battery AND the live-broker
   # round-trips actually run -- not just the schema fixtures.
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -25,13 +25,22 @@ jobs:
       - name: System build deps (for the broker daemon)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjansson-dev pkg-config build-essential
 
-      # janssonr (runix's one Import) is not on CRAN/r2u; install the versioned
-      # source tarball from the cornball drat. download.packages + R CMD INSTALL
-      # bypasses the RAPT install.packages shim and pins to the drat's version.
-      - name: Install janssonr from the cornball drat (source)
+      # janssonr (runix's one Import) ships as an apt binary from the cornball
+      # apt repository (rapt's pattern, unsigned -> Trusted: yes). It pulls the
+      # Jansson runtime via Depends -- no compile of janssonr itself. (The
+      # broker daemon still builds against libjansson-dev above.)
+      - name: Install janssonr from the cornball apt repository
         run: |
-          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
-          R CMD INSTALL janssonr_*.tar.gz
+          sudo tee /etc/apt/sources.list.d/janssonr.sources > /dev/null <<'EOF'
+          Types: deb
+          URIs: https://cornball-ai.github.io/janssonr
+          Suites: noble
+          Components: main
+          Trusted: yes
+          Enabled: yes
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y r-cornball-janssonr
 
       - name: R dependencies
         run: ./run.sh install_deps
@@ -149,7 +158,7 @@ jobs:
   # with the record carrying the unprivileged caller's kernel identity; and that
   # the unavailable/untrusted paths never advertise system durability.
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -174,10 +183,18 @@ jobs:
         uses: eddelbuettel/github-actions/r-ci@master
         with:
           backend: RAPT
-      - name: Install janssonr from the cornball drat (source)
+      - name: Install janssonr from the cornball apt repository
         run: |
-          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
-          R CMD INSTALL janssonr_*.tar.gz
+          sudo tee /etc/apt/sources.list.d/janssonr.sources > /dev/null <<'EOF'
+          Types: deb
+          URIs: https://cornball-ai.github.io/janssonr
+          Suites: noble
+          Components: main
+          Trusted: yes
+          Enabled: yes
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y r-cornball-janssonr
       - name: R dependencies
         run: ./run.sh install_deps
       - name: Install runix

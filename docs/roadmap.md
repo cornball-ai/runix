@@ -202,9 +202,12 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    strong capability. The receipt-based sink interface (step 1) is done.
    **Settled decisions:** AF_UNIX + socket activation for v1 (D-Bus deferred
    to when `rdbus` exists); **Jansson** for the broker parser (apt-serviced,
-   native `JSON_REJECT_DUPLICATES`, which json-c cannot do); no `janssonr` R
-   package (the C broker and R stack meet at the wire schema, not a shared
-   library; `yyjsonr` stays on the R side). Repo:
+   native `JSON_REJECT_DUPLICATES`, which json-c cannot do). The R stack has
+   since standardized on Jansson too, via the `janssonr` binding
+   (apt-installable as `r-cornball-janssonr`), replacing `yyjsonr`/`jsonlite`
+   across runix/rctl/rsystemd; the C broker and R adapter remain independent
+   bindings that meet at the wire schema, cross-checked by shared fixtures.
+   Repo:
    `cornball-ai/runix-audit-broker`; the json-c-independent core (framing,
    hardened sink, peer creds, getrandom ids/bindings) is implemented and
    passes under ASan/UBSan (draft PR #1). Build binary/tests pending
