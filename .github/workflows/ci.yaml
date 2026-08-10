@@ -77,16 +77,16 @@ jobs:
 
       # runix Imports janssonr on every platform (the broker sink parser uses it,
       # even where the transport is the compiled stub). Off Linux it builds from
-      # source against Homebrew's jansson; pull the versioned tarball from the drat.
-      - name: libjansson (brew) + janssonr from the cornball drat (source)
+      # source against Homebrew's jansson; pull the versioned tarball from the
+      # drat. tinytest comes from the default repo. We install both directly
+      # rather than via setup-r-dependencies: pak's solver does not resolve the
+      # drat-only janssonr, and these are the package's only dep + test dep.
+      - name: libjansson (brew) + janssonr from the cornball drat + tinytest
         run: |
           brew install jansson
           Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
           R CMD INSTALL janssonr_*.tar.gz
-
-      - uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          extra-packages: any::tinytest
+          Rscript -e 'install.packages("tinytest")'
 
       # bash so `R CMD INSTALL` runs the same everywhere (the Windows runner's
       # default shell is PowerShell, which mis-parses `R CMD INSTALL .`)
