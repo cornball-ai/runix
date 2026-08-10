@@ -25,6 +25,14 @@ jobs:
       - name: System build deps (for the broker daemon)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjansson-dev pkg-config build-essential
 
+      # janssonr (runix's one Import) is not on CRAN/r2u; install the versioned
+      # source tarball from the cornball drat. download.packages + R CMD INSTALL
+      # bypasses the RAPT install.packages shim and pins to the drat's version.
+      - name: Install janssonr from the cornball drat (source)
+        run: |
+          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
+          R CMD INSTALL janssonr_*.tar.gz
+
       - name: R dependencies
         run: ./run.sh install_deps
 
@@ -66,6 +74,15 @@ jobs:
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
+
+      # runix Imports janssonr on every platform (the broker sink parser uses it,
+      # even where the transport is the compiled stub). Off Linux it builds from
+      # source against Homebrew's jansson; pull the versioned tarball from the drat.
+      - name: libjansson (brew) + janssonr from the cornball drat (source)
+        run: |
+          brew install jansson
+          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
+          R CMD INSTALL janssonr_*.tar.gz
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -157,6 +174,10 @@ jobs:
         uses: eddelbuettel/github-actions/r-ci@master
         with:
           backend: RAPT
+      - name: Install janssonr from the cornball drat (source)
+        run: |
+          Rscript -e 'download.packages("janssonr", ".", repos = "https://cornball-ai.github.io/drat", type = "source")'
+          R CMD INSTALL janssonr_*.tar.gz
       - name: R dependencies
         run: ./run.sh install_deps
       - name: Install runix

@@ -89,10 +89,10 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 ##
 ## The response is trusted local IPC from an authenticated root peer, but the
 ## adapter still validates it exactly (audit-broker-contract.md): a closed key
-## set per shape, correct scalar types, documented value formats, and recursive
-## duplicate-key rejection. yyjsonr has no duplicate-key read flag, but it
-## PRESERVES duplicates as repeated names, so a recursive walk detects them;
-## that behaviour is pinned by a fixture (one top-level, one nested).
+## set per shape, correct scalar types, and documented value formats. Duplicate
+## keys are rejected by janssonr's parser itself -- it refuses them at any depth
+## as a janssonr_parse_error -- so a malformed response never reaches the shape
+## checks; a fixture pins that rejection (one top-level, one nested).
 
 .BROKER_SHAPES <- list(
     outcome_ok = c("ok", "persisted"),
@@ -116,22 +116,6 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 .broker_is_true <- function(x) is.logical(x) && length(x) == 1L && isTRUE(x)
 .broker_is_bool <- function(x) is.logical(x) && length(x) == 1L && !is.na(x)
 
-## Recursively reject any decoded object with a duplicate or empty key.
-.broker_has_bad_keys <- function(x) {
-    if (is.list(x)) {
-        nm <- names(x)
-        if (!is.null(nm) && (anyDuplicated(nm) != 0L || any(!nzchar(nm)))) {
-            return(TRUE)
-        }
-        for (el in x) {
-            if (.broker_has_bad_keys(el)) {
-                return(TRUE)
-            }
-        }
-    }
-    FALSE
-}
-
 ## Parse + strictly validate a response body (raw or character). Returns
 ## list(kind = <shape>|"invalid", fields = <parsed>, reason = <chr>).
 .broker_parse_response <- function(body) {
@@ -143,15 +127,16 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     if (length(txt) != 1L || is.na(txt)) {
         return(list(kind = "invalid", reason = "unreadable body"))
     }
-    parsed <- tryCatch(yyjsonr::read_json_str(txt), error = function(e) e)
+    ## janssonr parses strictly: it refuses duplicate keys (at any depth),
+    ## trailing content, and bad UTF-8 as a classed condition. A refusal is a
+    ## malformed response from the authenticated peer -> "invalid", which the
+    ## caller maps to runix_broker_bad_response, never "unavailable".
+    parsed <- tryCatch(janssonr::from_json(txt), error = function(e) e)
     if (inherits(parsed, "condition")) {
         return(list(kind = "invalid", reason = "parse error"))
     }
     if (!is.list(parsed) || is.null(names(parsed))) {
         return(list(kind = "invalid", reason = "not a JSON object"))
-    }
-    if (.broker_has_bad_keys(parsed)) {
-        return(list(kind = "invalid", reason = "duplicate or empty key"))
     }
     nm <- names(parsed)
     if (!("ok" %in% nm) || !.broker_is_bool(parsed$ok)) {

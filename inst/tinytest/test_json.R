@@ -42,18 +42,18 @@ Encoding(bad) <- "UTF-8"
 expect_error(encode_json_line(list(s = bad)))
 
 ## escaping round-trips through a real parser
-if (requireNamespace("jsonlite", quietly = TRUE)) {
-    rt <- function(x) jsonlite::fromJSON(encode_json_line(x))
+if (requireNamespace("janssonr", quietly = TRUE)) {
+    rt <- function(x) janssonr::from_json(encode_json_line(x))
     s <- "line1\nline2\ttab \"q\" back\\slash  café"
     expect_equal(rt(list(s = s))$s, s)
     got <- rt(list(a = 1L, b = TRUE, c = NA, d = 0.25))
     expect_equal(got$a, 1L)
     expect_true(got$b)
-    expect_true(is.null(got$c))   # JSON null round-trips to NULL under jsonlite
+    expect_true(is.null(got$c))   # JSON null round-trips to NULL under janssonr
     expect_equal(got$d, 0.25)
-    ## nested + array round-trip
+    ## nested + array round-trip; janssonr maps a JSON array to an unnamed list
     nested <- list(op = "x", observed = list(state = "active"), tags = c("a", "b"))
     back <- rt(nested)
     expect_equal(back$observed$state, "active")
-    expect_equal(back$tags, c("a", "b"))
+    expect_equal(back$tags, list("a", "b"))
 }

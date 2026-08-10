@@ -26,7 +26,7 @@
 #' @param lock_stale Age in seconds past which a lock whose owner is gone is
 #'   considered stale and stolen.
 #' @param encoder \code{function(record)} returning one JSON line (default
-#'   \code{\link{encode_json_line}}; inject \code{yyjsonr} etc. if desired).
+#'   \code{\link{encode_json_line}}; inject \code{janssonr} etc. if desired).
 #' @param syncer \code{function(path)} that fsyncs the file, erroring on
 #'   failure (default shells to coreutils \code{sync --data}).
 #' @param dir_syncer \code{function(dir)} that fsyncs the parent directory

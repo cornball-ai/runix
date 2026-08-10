@@ -32,10 +32,11 @@ for (i in seq_len(nrow(bodies))) {
     if (row$accept == 1L) {
         expect_equal(v$kind, row$tag, info = paste("kind", row$name))
     }
-    ## the dup fixtures (top-level and nested) must be rejected specifically via
-    ## the recursive dup path -- the yyjsonr behavioural tripwire
+    ## the dup fixtures (top-level and nested) must be rejected at parse time:
+    ## janssonr's parser refuses duplicate keys at any depth, so a dup body never
+    ## reaches the shape checks -- it fails as a parse error.
     if (identical(row$tag, "dup")) {
-        expect_equal(v$reason, "duplicate or empty key",
+        expect_equal(v$reason, "parse error",
                      info = paste("dup tripwire", row$name))
     }
 }
@@ -293,7 +294,7 @@ if (tinytest::at_home() && is_linux && nzchar(broker_bin) &&
     expect_true(length(lines) > 0L)
     all_mine <- TRUE
     for (ln in lines) {
-        rec <- tryCatch(yyjsonr::read_json_str(ln), error = function(e) NULL)
+        rec <- tryCatch(janssonr::from_json(ln), error = function(e) NULL)
         if (is.null(rec)) next
         if (identical(rec$record_type, "audit")) {
             if (!identical(as.integer(rec$broker$peer$uid), myuid)) {

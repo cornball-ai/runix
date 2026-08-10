@@ -11,7 +11,7 @@
 #' model correctly (unsupported classes, non-finite numbers, invalid UTF-8,
 #' duplicate object keys, nesting beyond `max_depth`) rather than emit
 #' something wrong. A consumer that needs a fuller or faster encoder (e.g.
-#' `yyjsonr`) can inject it wherever this is used.
+#' `janssonr`) can inject it wherever this is used.
 #'
 #' @param x Value to encode: a scalar, an atomic vector, or a possibly nested
 #'   list. Named lists become JSON objects (insertion order); unnamed
