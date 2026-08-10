@@ -1,0 +1,102 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  _R_CHECK_FORCE_SUGGESTS_: "false"
+
+jobs:
+  # Linux: the broker's real platform. Build the sibling broker daemon, then run
+  # the full tinytest suite as "at home" (tinytest::at_home() is TRUE outside
+  # R CMD check) so the hostile fake-responder battery AND the live-broker
+  # round-trips actually run -- not just the schema fixtures.
+  linux:
+    runs-on: ubuntu-latest
+    env:
+      # secrets cannot be referenced in `if:` directly; hoist to an env flag
+      HAS_BROKER_TOKEN: ${{ secrets.RUNIX_BROKER_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup r-ci
+        uses: eddelbuettel/github-actions/r-ci@master
+        with:
+          backend: RAPT
+
+      - name: System build deps (for the broker daemon)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjansson-dev pkg-config build-essential
+
+      - name: R dependencies
+        run: ./run.sh install_deps
+
+      # The broker daemon lives in a sibling repo. The real-broker leg needs a
+      # checkout of it; if RUNIX_BROKER_TOKEN is set it is built and the live
+      # tests run, otherwise only the hostile fake-responder tests run (they
+      # need no daemon). Set the secret (a read token for the broker repo, or
+      # make that repo public) to arm the real-broker leg -- see gate 4.
+      - name: Build the broker daemon
+        if: ${{ env.HAS_BROKER_TOKEN == 'true' }}
+        run: |
+          git clone --depth 1 \
+            https://x-access-token:${{ secrets.RUNIX_BROKER_TOKEN }}@github.com/cornball-ai/runix-audit-broker.git \
+            "${RUNNER_TEMP}/rab"
+          make -C "${RUNNER_TEMP}/rab"
+          echo "RUNIX_TEST_BROKER_BIN=${RUNNER_TEMP}/rab/audit-broker" >> "$GITHUB_ENV"
+
+      - name: Install runix (compiles the AF_UNIX client)
+        run: R CMD INSTALL .
+
+      - name: Tests (fake-responder battery + live broker when armed)
+        run: |
+          Rscript -e 'r <- tinytest::test_package("runix"); n <- sum(!vapply(r, isTRUE, logical(1))); cat(length(r), "checks,", n, "failures\n"); quit(status = as.integer(n > 0))'
+
+      - name: R CMD check (CRAN cleanliness)
+        run: ./run.sh run_tests
+
+  # Windows and macOS: the broker is Linux-only. The package must still install,
+  # load, and keep its portable sinks working, while every broker call returns a
+  # typed runix_broker_unavailable (the compiled stub). A successful build here
+  # is also the proof of "no accidental Unix header/link dependency".
+  stub:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::tinytest
+
+      - name: Install runix (compiles the guarded stub)
+        run: R CMD INSTALL .
+
+      - name: Load, and prove the broker is typed-unavailable off Linux
+        shell: Rscript {0}
+        run: |
+          library(runix)
+          s <- broker_audit_sink()
+          r <- s$open_intent(list(operation = "x", outcome = "intent"))
+          stopifnot(!isTRUE(r$persisted),
+                    identical(r$error, "runix_broker_unavailable"),
+                    is.na(r$audit_scope))
+          # portable sinks still work
+          m <- memory_audit_sink()
+          stopifnot(isTRUE(m$emit(list(outcome = "ok"), "outcome")$persisted))
+          cat("stub OK on", Sys.info()[["sysname"]], "\n")
+
+      - name: Tests (portable sinks + schema fixtures; broker tests self-skip)
+        shell: Rscript {0}
+        run: |
+          r <- tinytest::test_package("runix")
+          n <- sum(!vapply(r, isTRUE, logical(1)))
+          cat(length(r), "checks,", n, "failures\n")
+          quit(status = as.integer(n > 0))

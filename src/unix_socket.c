@@ -393,12 +393,17 @@ SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
         return ScalarInteger(-1);
     }
     strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
-    if (bind(lfd, (struct sockaddr *) &addr, sizeof addr) != 0 ||
-        listen(lfd, 1) != 0) {
+    if (bind(lfd, (struct sockaddr *) &addr, sizeof addr) != 0) {
         close(lfd);
-        return ScalarInteger(-1); /* bind failed: we created nothing to remove */
+        return ScalarInteger(-1); /* bind failed: nothing created to remove */
     }
-    /* from here on we own the socket file and must remove it on every path */
+    /* bind created the socket file; from here we own it and must remove it on
+     * every exit path -- including a listen() failure. */
+    if (listen(lfd, 1) != 0) {
+        close(lfd);
+        unlink(path);
+        return ScalarInteger(-1);
+    }
 
     long long now = rab_now_ms();
     if (now < 0) {
