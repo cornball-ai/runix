@@ -78,10 +78,18 @@ weaker guarantee is explicitly accepted and advertised as such (its own
    framed (length-prefixed); each record is validated against the durable-audit
    schema and a size cap before any write. Malformed or oversize requests are
    rejected, not written.
-7. **Rate limits and quotas.** Per-actor rate limits and total quotas resist
-   log-filling attacks (an unprivileged caller flooding the root sink to
-   exhaust disk or drown real records). Rejection is explicit and itself
-   auditable in aggregate.
+7. **Rate limits and write-byte quotas.** Three separate controls resist
+   log-filling attacks (an unprivileged caller flooding the root sink to exhaust
+   disk or drown real records), each rejecting with `rate_limited` before any
+   append: a **per-uid op-count** limit (records/uid/window), a **per-uid
+   write-byte** quota (appended bytes/uid/window), and a **global write-byte**
+   quota (appended bytes/window across all uids). The op-count limit alone is
+   insufficient — at its cap a caller can still write that many maximum-size
+   frames — so the per-uid byte quota is required, not optional. These are
+   **distinct from retention** (req. in the durable-state section): the op-count
+   and byte quotas bound what a caller may *write*; retention bounds what is kept
+   *on disk*. One is not a substitute for another. Rejection is explicit and
+   itself auditable in aggregate.
 8. **Atomic append and fsync via the hardened sink.** The broker performs the
    actual write through the runix hardened file sink: whole-line `O_APPEND`,
    advisory lock, file fsync, parent-directory fsync on create/rotation,
@@ -295,13 +303,24 @@ safe.
     loses an open intent;
   - the rotation swap holds the sink's advisory lock, and a post-rename fsync
     failure poisons the broker (the rename may not be durable).
-- **Rate state survives rotation.** Rotation writes one `broker_rate` record
-  per active uid into the new segment: the broker-assigned timestamps still
-  inside the rate window (only those). Reconstruction reseeds the per-uid ring
-  from it, so idle-exit + rotation + restart cannot reset a caller's rate
-  window. The window boundary is **inclusive**: a timestamp exactly
-  `now - window` old still counts against the limit (and is still carried); one
-  microsecond older does not.
+- **Rate and per-uid byte state survive rotation.** Rotation writes one
+  `broker_rate` record per active uid into the new segment: for every op still
+  inside the rate window, its broker-assigned timestamp AND its appended byte
+  size (parallel `times_us` / `bytes` arrays, one-to-one). Reconstruction
+  reseeds the per-uid ring from it, so idle-exit + rotation + restart cannot
+  reset a caller's op-count rate window **or** its per-uid write-byte quota. The
+  window boundary is **inclusive**: a timestamp exactly `now - window` old still
+  counts against both limits (and is still carried); one microsecond older does
+  not.
+- **The global write-byte quota is deliberately not persisted.** Unlike the
+  per-uid quota, the global ceiling is a tumbling window reset on restart. This
+  is intentional, not an oversight: the broker only idle-exits after an idle
+  period longer than the window (so there is no in-window global state to carry),
+  and a crash-restart merely resets a deliberately coarse total-volume ceiling
+  while the per-uid quotas — which do persist — still bound every caller. A
+  per-uid write-byte quota therefore requires the op-count limit to be enabled
+  (the op ring bounds its state); that combination is validated at startup and
+  refused otherwise (fail closed).
 - **Archive retention.** Retired segments are bounded by **both** a segment
   count and a total byte budget, and the active segment counts toward the byte
   budget. Oldest archives are pruned first, and **only after** the new
@@ -455,6 +474,13 @@ Record shape and the sink-extension:
     connections, a second client's complete request is served within its
     deadline, not queued behind the slow connections' deadlines; and a
     connection beyond the per-uid concurrency cap is dropped.
+37. **Write-byte quotas** — with the op-count limit set high, a per-uid flood is
+    stopped by the per-uid byte quota (a second uid is unaffected, and the
+    window slides open after it elapses); a cross-uid flood is stopped by the
+    global byte quota (which rolls over on the next window). The per-uid byte
+    quota survives rotation + restart via `broker_rate` and then ages out; a
+    per-uid byte quota configured without the op-count limit is refused at
+    startup.
 
 ## Packaging and activation gate (CI)
 
