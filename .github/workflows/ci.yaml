@@ -2,7 +2,18 @@ name: ci
 
 on:
   push:
+    branches: [master]
   pull_request:
+
+# Least privilege: CI only reads the repo (no releases, comments, or writes).
+permissions:
+  contents: read
+
+# One run per ref; a new push to a PR cancels the superseded run (but never a
+# master run, which we let finish).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   _R_CHECK_FORCE_SUGGESTS_: "false"
