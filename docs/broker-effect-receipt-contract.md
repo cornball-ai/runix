@@ -177,7 +177,9 @@ pinned — not left to "hash the plan":
     bytewise-sorted `k=v` comma list over the **fixed key set**
     `{signed-by, architectures, trusted}` (the identity-relevant deb822 source
     fields); keys outside the set are excluded from the digest, and values obey
-    the delimiter rule above.
+    the delimiter rule above. **Boundary:** this digest proves the *configured
+    source set*, not the remote content later fetched from those sources — remote
+    payloads are outside the receipt's scope, and tests and messaging must say so.
 - **Golden vectors** for each verb (including empty and single-record cases) are
   part of the shared fixture corpus, so R and the C helper are proven to produce
   identical bytes and the same digest — the encoding is pinned by test, not prose.
