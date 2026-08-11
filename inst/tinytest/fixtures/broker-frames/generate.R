@@ -28,6 +28,11 @@ OUTCOME_OK <- '{"ok":true,"persisted":true}'
 EMIT_OK <- sprintf(paste0('{"audit_scope":"system","correlation_id":"%s",',
                           '"ok":true,"persisted":true}'), CID)
 ERROR <- '{"error":"schema_invalid","message":"nope","ok":false}'
+## capability discovery: read-only, opens no intent. `extensions` is empty and
+## `plan_schemas` is [] until the broker honours a capability (absent => not
+## supported); the response is forward-extensible under this same shape.
+CAPS_OK <- paste0('{"extensions":{},"frame_version":1,"ok":true,',
+                  '"plan_schemas":[],"record_schema_version":1}')
 
 ## body fixtures: name, accept, tag (kind for accepts; reject category else),
 ## body bytes
@@ -35,6 +40,7 @@ bodies <- list(
     list("open_ok", TRUE, "open_ok", OPEN_OK),
     list("outcome_ok", TRUE, "outcome_ok", OUTCOME_OK),
     list("emit_ok", TRUE, "emit_ok", EMIT_OK),
+    list("capabilities_ok", TRUE, "capabilities_ok", CAPS_OK),
     list("error", TRUE, "error", ERROR),
     list("dup_toplevel", FALSE, "dup", '{"ok":true,"ok":true,"persisted":true}'),
     list("dup_nested", FALSE, "dup",

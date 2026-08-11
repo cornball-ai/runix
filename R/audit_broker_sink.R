@@ -98,6 +98,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
                        outcome_ok = c("ok", "persisted"),
                        emit_ok = c("audit_scope", "correlation_id", "ok", "persisted"),
                        open_ok = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
+                       capabilities_ok = c("extensions", "frame_version", "ok",
+                                           "plan_schemas", "record_schema_version"),
                        error = c("error", "message", "ok"))
 
 ## The broker's closed error-code set (PROTOCOL.md). Anything else in an error
@@ -115,6 +117,46 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 .broker_is_str <- function(x) is.character(x) && length(x) == 1L && !is.na(x)
 .broker_is_true <- function(x) is.logical(x) && length(x) == 1L && isTRUE(x)
 .broker_is_bool <- function(x) is.logical(x) && length(x) == 1L && !is.na(x)
+## a scalar version/count: one non-NA integer-valued number >= 1. janssonr
+## returns whole JSON numbers as R integers; tolerate a whole double too.
+.broker_is_count <- function(x) {
+    is.numeric(x) && length(x) == 1L && !is.na(x) && is.finite(x) &&
+        x >= 1 && x == round(x)
+}
+## a JSON object: janssonr gives a named list, and even an empty object carries
+## character(0) names (non-NULL). A JSON array gives NULL names, so names()
+## being non-NULL is what distinguishes an object from an array here.
+.broker_is_object <- function(x) is.list(x) && !is.null(names(x))
+## a JSON array of scalar counts: NULL names mark it an array (not an object),
+## and every element is a scalar count. An empty array is valid (vacuously).
+.broker_is_int_array <- function(x) {
+    is.list(x) && is.null(names(x)) &&
+        all(vapply(x, .broker_is_count, logical(1)))
+}
+
+## Validate a capabilities response body (already top-level shape-matched).
+## frame_version/record_schema_version are scalar integers; plan_schemas is an
+## integer array; extensions is forward-extensible -- a known extension
+## (effect_receipt) must carry a scalar integer version, but unknown extension
+## names are ignored so future capabilities never break this client. Both the
+## empty {} / [] response and a populated effect_receipt:1 / [1] response pass.
+.broker_validate_capabilities <- function(parsed) {
+    if (!.broker_is_count(parsed$frame_version) ||
+        !.broker_is_count(parsed$record_schema_version)) {
+        return(list(kind = "invalid", reason = "bad capability version"))
+    }
+    if (!.broker_is_int_array(parsed$plan_schemas)) {
+        return(list(kind = "invalid", reason = "bad plan_schemas"))
+    }
+    if (!.broker_is_object(parsed$extensions)) {
+        return(list(kind = "invalid", reason = "bad extensions"))
+    }
+    er <- parsed$extensions[["effect_receipt"]]
+    if (!is.null(er) && !.broker_is_count(er)) {
+        return(list(kind = "invalid", reason = "bad effect_receipt version"))
+    }
+    list(kind = "capabilities_ok", fields = parsed)
+}
 
 ## Reserved identity/framing keys a sink owns; a subsystem must never put them in
 ## a record's domain content. The broker derives actor/host/pid/time from the
@@ -163,7 +205,7 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     }
     if (isTRUE(parsed$ok)) {
         kind <- NULL
-        for (k in c("open_ok", "emit_ok", "outcome_ok")) {
+        for (k in c("open_ok", "emit_ok", "outcome_ok", "capabilities_ok")) {
             if (setequal(nm, .BROKER_SHAPES[[k]])) {
                 kind <- k
                 break
@@ -171,6 +213,11 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         }
         if (is.null(kind)) {
             return(list(kind = "invalid", reason = "no exact success shape"))
+        }
+        ## capability discovery carries no durable effect: no persisted flag,
+        ## correlation id, or audit scope. Validate its own shape and return.
+        if (identical(kind, "capabilities_ok")) {
+            return(.broker_validate_capabilities(parsed))
         }
         if (!.broker_is_true(parsed$persisted)) {
             return(list(kind = "invalid", reason = "persisted not TRUE"))

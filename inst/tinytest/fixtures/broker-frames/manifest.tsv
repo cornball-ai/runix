@@ -2,6 +2,7 @@ name	layer	accept	tag	file
 open_ok	body	1	open_ok	open_ok.json
 outcome_ok	body	1	outcome_ok	outcome_ok.json
 emit_ok	body	1	emit_ok	emit_ok.json
+capabilities_ok	body	1	capabilities_ok	capabilities_ok.json
 error	body	1	error	error.json
 dup_toplevel	body	0	dup	dup_toplevel.json
 dup_nested	body	0	dup	dup_nested.json
