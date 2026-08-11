@@ -1,5 +1,6 @@
 # tinyrox says don't edit this manually, but it can't stop you!
 
+export(audit_actor)
 export(audit_emit)
 export(audit_scope_for)
 export(audit_two_phase)

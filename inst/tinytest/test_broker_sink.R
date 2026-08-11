@@ -61,6 +61,31 @@ expect_equal(s0$emit(list(operation = "x", outcome = "ok"), "outcome")$error,
              "runix_broker_bad_phase")
 expect_equal(s0$emit(list(operation = "x"), "intent")$error,
              "runix_broker_bad_phase")
+## reserved identity/framing keys are refused LOCALLY, before any transport:
+## the broker owns actor/host/pid/time and mints correlation_id/binding, so a
+## record that leaks one fails closed and named here rather than being stripped
+## or only rejected at the wire (audit-broker-contract.md). This is the exact
+## producer bug the canary found: a subsystem putting actor in domain content.
+for (k in c("actor", "correlation_id", "phase", "host", "pid", "time",
+            "binding", "broker", "record_type", "schema_version")) {
+    rec <- list(operation = "x", outcome = "intent")
+    rec[[k]] <- "z"
+    expect_equal(s0$open_intent(rec)$error, "runix_broker_reserved_field",
+                 info = paste("open_intent reserved:", k))
+}
+## emit (valid phase) and write_outcome (valid binding) reject them too, and the
+## reserved check precedes the binding check.
+expect_equal(s0$emit(list(operation = "x", outcome = "preview",
+                          actor = "uid:0"), "preview")$error,
+             "runix_broker_reserved_field")
+expect_equal(s0$write_outcome(list(binding = "deadbeef"),
+                              list(operation = "x", outcome = "ok",
+                                   actor = "uid:0"))$error,
+             "runix_broker_reserved_field")
+## a clean record still passes the local check and reaches transport
+## (unavailable here, since there is no broker) -- proof the gate is specific.
+expect_equal(s0$open_intent(list(operation = "x", outcome = "intent"))$error,
+             "runix_broker_unavailable")
 ## no-binding guard: refuse before any transport
 expect_equal(s0$write_outcome(list(binding = NA_character_),
                               list(outcome = "ok"))$error,
