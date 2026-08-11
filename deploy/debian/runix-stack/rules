@@ -1,0 +1,4 @@
+#!/usr/bin/make -f
+# Metapackage: no upstream content, just the dependency closure in control.
+%:
+	dh $@

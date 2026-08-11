@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+# Manual debhelper for a Runix R package. R packages carry no root Makefile, so
+# dh detects no buildsystem and dh_auto_configure/build are no-ops; R CMD
+# INSTALL compiles (when src/ is present) and stages the package into the
+# per-package site-library, after which dh_shlibdeps derives ${shlibs:Depends}
+# from any resulting shared object.
+PKG := $(shell dh_listpackages)
+LIB := $(CURDIR)/debian/$(PKG)/usr/lib/R/site-library
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	mkdir -p $(LIB)
+	R CMD INSTALL --library=$(LIB) --clean .
+
+# The R test suite runs in each package's own CI, not in the .deb build.
+override_dh_auto_test:

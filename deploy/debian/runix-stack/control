@@ -1,0 +1,23 @@
+Source: runix-stack
+Section: admin
+Priority: optional
+Maintainer: Troy Hernandez <troy@cornball.ai>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/cornball-ai/runix
+Rules-Requires-Root: no
+
+Package: runix-stack
+Architecture: all
+Depends: ${misc:Depends},
+ r-cornball-rctl,
+ r-cornball-pkgstate,
+ r-cornball-rsystemd,
+ runix-audit-broker
+Description: metapackage installing the full Runix stack
+ One-step install of the Runix system-administration stack: the rctl
+ command-line interface, the pkgstate and rsystemd subsystems, and the
+ privileged audit broker. Installs no files of its own; it only pulls in the
+ stack.
+ .
+ Experimental. Part of Runix (https://github.com/cornball-ai/runix).

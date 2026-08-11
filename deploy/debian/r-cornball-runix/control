@@ -1,0 +1,19 @@
+Source: r-cornball-runix
+Section: gnu-r
+Priority: optional
+Maintainer: Troy Hernandez <troy@cornball.ai>
+Build-Depends: debhelper-compat (= 13), r-base-dev (>= 4.6.0), r-cornball-janssonr
+Standards-Version: 4.7.0
+Homepage: https://github.com/cornball-ai/runix
+Rules-Requires-Root: no
+
+Package: r-cornball-runix
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, r-base-core (>= 4.6.0), r-api-4.0, r-cornball-janssonr
+Description: common core for the Runix system-administration framework
+ Runix is an R-native Linux system-administration framework. This package is
+ its common core: durable two-phase audit, the compiled AF_UNIX client for the
+ privileged audit broker, and the shared result/condition model the subsystem
+ packages build on.
+ .
+ Experimental. Part of Runix (https://github.com/cornball-ai/runix).

@@ -45,11 +45,15 @@ Stop hand-authoring binary `.deb`s. Each package gets real Debian packaging:
 - **`${DEB_HOST_ARCH}`** — `amd64` is the first build target, not metadata baked
   into the design. `runix` and `janssonr` are `Architecture: any` (compiled);
   pure-R packages are `Architecture: all`.
-- **Debian version revisions**, e.g. `0.0.1.8-1`.
-- **R ≥ 4.6 floor encoded where the compiled artifact requires it** — depending
-  on `r-cornball-janssonr` brings the floor transitively; don't duplicate a
-  blanket `r-base-core (>= 4.6.0)` on every package, and keep it out of
-  DESCRIPTION `Depends: R (>= ...)` (a binary-ABI fact, not a source fact).
+- **Native source format** (`3.0 (native)`, version == R version) for A0-dev —
+  matches the broker's packaging and needs no orig-tarball juggling. The
+  non-native `-1` revisions + orig tarballs arrive with the Debian submission.
+- **Every R binary directly declares the R interpreter + ABI**:
+  `r-base-core (>= 4.6.0), r-api-4.0` on each package (the r-cran convention /
+  dh-r-equivalent metadata) — not left to `janssonr`/`runix` pulling R
+  transitively. The `>= 4.6.0` floor stays out of DESCRIPTION `Depends: R (>= ...)`
+  (a binary-ABI fact, not a source fact); `r-api-4.0` guards against R ABI breaks
+  a bare version floor would miss.
 
 ## Package graph + optionality (capability-driven)
 
@@ -58,11 +62,11 @@ packages would contradict the design.
 
 | deb | arch | Depends | Recommends |
 |---|---|---|---|
-| `r-cornball-janssonr` | any | `r-base-core (>= 4.6.0)`, `${shlibs:Depends}` | |
-| `r-cornball-runix` | any | `r-cornball-janssonr`, `${shlibs:Depends}` | |
-| `r-cornball-pkgstate` | all | `r-cornball-runix` | |
-| `r-cornball-rsystemd` | all | `r-cornball-janssonr`, `r-cornball-runix` | |
-| `r-cornball-rctl` | all | `r-cornball-janssonr`, `r-cornball-runix`, `littler` | `r-cornball-pkgstate`, `r-cornball-rsystemd` |
+| `r-cornball-janssonr` | any | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `${shlibs:Depends}` | |
+| `r-cornball-runix` | any | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `${shlibs:Depends}`, `r-cornball-janssonr` | |
+| `r-cornball-pkgstate` | all | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `r-cornball-runix` | |
+| `r-cornball-rsystemd` | all | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `r-cornball-janssonr`, `r-cornball-runix` | |
+| `r-cornball-rctl` | all | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `r-cornball-janssonr`, `r-cornball-runix` | `r-cornball-pkgstate`, `r-cornball-rsystemd` |
 | `runix-audit-broker` | any | `${shlibs:Depends}` | |
 | `runix-stack` (meta) | all | `r-cornball-rctl`, `r-cornball-pkgstate`, `r-cornball-rsystemd`, `runix-audit-broker` | |
 
@@ -71,13 +75,21 @@ packages would contradict the design.
   useful for capability discovery, with pkgstate/rsystemd as removable
   Recommends.
 
-> Alignment check (pre-code): rctl's DESCRIPTION declares pkgstate / rsystemd as
-> **Imports** (hard). For the deb to make them **Recommends**, rctl must load
-> them softly (`requireNamespace`, matching the `present:false` capability path).
-> Confirm/convert rctl's dependency classes so the R package and the deb agree —
-> otherwise a Recommends that R hard-requires is a lie. (janssonr for A0-dev: use
-> the existing `r-cornball-janssonr` apt binary; its own debian/ packaging is the
-> janssonr session's.)
+> Alignment check (resolved in code): rctl's DESCRIPTION already declares
+> pkgstate / rsystemd as **Suggests** (soft, runtime-detected), so **Recommends**
+> is honest — no rctl change needed. (janssonr for A0-dev: use the existing
+> `r-cornball-janssonr` apt binary; its own debian/ packaging is the janssonr
+> session's.)
+
+> `littler` dropped from rctl's Depends (was in the pre-code graph). Two reasons,
+> one evidential: (1) rctl's DESCRIPTION lists littler as a **Suggests**, so a
+> hard Depends would be a dishonest declaration; (2) the A1 canary showed the
+> distribution's littler is ABI-pinned to R 4.3 and cannot co-install with the
+> CRAN R (>= 4.6) the stack requires — a hard Depends would make rctl
+> **uninstallable** in the exact environment A0-dev targets. `/usr/bin/rctl` is
+> therefore the Rscript launcher (`rctl-rscript`), which needs no littler. A
+> CRAN-R-compatible littler returns as an optional Recommends once one is
+> packaged (r2u/rapt).
 
 ## Testing (local files, disposable VMs only)
 
@@ -87,8 +99,13 @@ built `.deb`s copied in (no repository):
 - **install** — `apt install ./r-cornball-*.deb ./runix-stack*.deb` resolves the
   graph from local files (janssonr from its apt binary as the one external dep).
 - **upgrade** — install an older build, then a newer, no manual steps.
-- **remove** — `apt remove` / `purge`; **purge-safe**: system-owned audit data
-  survives `remove` and is removed only on explicit `purge`.
+- **remove / purge** — the R packages ship no conffiles, so `apt remove` leaves
+  no `rc` residue; the broker leaves only debhelper's socket-unit lifecycle
+  state, cleared on `purge`. The durable audit sink (`/var/log/runix`) is
+  runtime-created by the broker daemon, **not package-tracked**, so it survives
+  both `remove` and `purge` — audit evidence is operator-owned state that apt
+  never deletes as a side effect (consistent with "audit records are evidence";
+  deleting it is a deliberate operator action). Verified on the A0-dev canary.
 - **acceptance** — the A1 gates (`rctl capabilities`, an unprivileged
   `services.restart` through the broker, durable intent+outcome) pass against the
   **apt-installed** stack — closing the loop from "runs from source" to

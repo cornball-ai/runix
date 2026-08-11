@@ -1,0 +1,18 @@
+Source: r-cornball-rsystemd
+Section: gnu-r
+Priority: optional
+Maintainer: Troy Hernandez <troy@cornball.ai>
+Build-Depends: debhelper-compat (= 13), r-base-dev (>= 4.6.0), r-cornball-janssonr, r-cornball-runix
+Standards-Version: 4.7.0
+Homepage: https://github.com/cornball-ai/rsystemd
+Rules-Requires-Root: no
+
+Package: r-cornball-rsystemd
+Architecture: all
+Depends: ${misc:Depends}, r-base-core (>= 4.6.0), r-api-4.0, r-cornball-janssonr, r-cornball-runix
+Description: systemd service introspection and managed mutations for Runix
+ Read-only systemd introspection (units, timers, journal) and managed service
+ mutations for the Runix framework, routing durable audit through the Runix
+ broker.
+ .
+ Experimental. Part of Runix (https://github.com/cornball-ai/runix).

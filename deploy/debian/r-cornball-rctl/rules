@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+# Manual debhelper for the rctl R package. Like the other Runix R packages, but
+# rctl ships launcher scripts under the package's bin/ and exposes rctl on PATH:
+#   - the /usr/bin/rctl symlink is declared in debian/r-cornball-rctl.links;
+#   - dh_fixperms strips the executable bit from files outside the standard bin
+#     dirs, so we re-assert 0755 on the launchers it would otherwise break.
+PKG := $(shell dh_listpackages)
+LIB := $(CURDIR)/debian/$(PKG)/usr/lib/R/site-library
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	mkdir -p $(LIB)
+	R CMD INSTALL --library=$(LIB) --clean .
+
+override_dh_auto_test:
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0755 $(LIB)/rctl/bin/rctl $(LIB)/rctl/bin/rctl-rscript
