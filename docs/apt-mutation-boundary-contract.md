@@ -36,12 +36,21 @@ implementable against the **shipped** audit broker (`runix-audit-broker`
 5. **Scope tightened.** `apt.configure` and hold/unhold gain risk metadata,
    repository/key mutation is deferred to its own hardened contract, and package
    ownership uses rapt's exact predicate across the whole computed transaction.
+6. **The privileged boundary is not bypassable.** Authorization is enforced
+   **per verb** in polkit (separate action IDs by risk class, not one umbrella),
+   and the helper **independently** recomputes and policy-checks every
+   transaction (ownership/holds/protected/options) instead of trusting the
+   unprivileged preview — over a narrow, non-evaluating protocol, with apt's own
+   `DPkg::Lock::Timeout` lock. Preview is honest per operation (a real simulate
+   only for package transactions).
 
 ## Scope and boundary
 
 - **In scope:** the boundary for mutating installed-package state through
-  apt/dpkg on the local host: install, remove, purge, upgrade, repository
-  and key changes, and list refresh.
+  apt/dpkg on the local host: install, remove, purge, upgrade, list refresh,
+  configure (repair), and hold/unhold. **Repository and key changes are out of
+  scope for v1**, deferred to their own hardened contract (see the metadata
+  section).
 - **Out of scope, read side:** querying package state is `pkgstate`, already
   built. apt mutations *use* `pkgstate` to read before/after state.
 - **Out of scope, rapt:** `rapt` is the r2u binary R-package install backend
@@ -61,9 +70,12 @@ implementable against the **shipped** audit broker (`runix-audit-broker`
 Applying the roadmap's authorization-and-risk policy to apt: each operation
 carries explicit metadata, and the **fleet policy** reads it to decide
 go/no-go, rather than a fixed "install vs update" verb category (an upgrade
-can be as disruptive as an install). `preview_available` is `TRUE` for all of
-these via apt's simulate. `approval_required` below is the **default**; the
-fleet policy may raise or lower it per operation and per host role.
+can be as disruptive as an install). `preview_available` varies by operation
+(column below) and is honest about what it can show — a real apt simulation for
+package transactions, a synthesized state change for holds, and none for
+`apt.configure`/`apt.update` (see Preview). `approval_required` below is the
+**default**; the fleet policy may raise or lower it per operation and per host
+role.
 
 **`requires_authorization` and `approval_required` are orthogonal axes; do not
 collapse them.**
@@ -81,15 +93,15 @@ it autonomously through the privileged helper without a human in the loop.
 Collapsing the two would either make routine list refreshes wait on a human, or
 falsely mark a privileged effect as needing no OS authorization.
 
-| Operation | reversible | disruptive | requires_authorization | approval_required (default) |
-|---|---|---|---|---|
-| `apt.install` | partial (remove undoes it) | maybe (config, deps) | yes | yes |
-| `apt.remove`, `apt.purge` | maybe (reinstall; purge drops config) | yes | yes | yes |
-| `apt.upgrade`, `apt.dist_upgrade` | hard | yes | yes | yes |
-| `apt.configure` (repair, `dpkg --configure -a`) | n/a (completes pending config) | maybe (maintainer scripts) | yes | yes |
-| `apt.hold` | yes (unhold) | no | yes | no |
-| `apt.unhold` | yes (re-hold) | no | yes | yes |
-| `apt.update` (list refresh) | n/a (no package change) | no | **yes** | no |
+| Operation | reversible | disruptive | requires_authorization | approval_required (default) | preview_available |
+|---|---|---|---|---|---|
+| `apt.install` | partial (remove undoes it) | maybe (config, deps) | yes | yes | yes (apt simulate) |
+| `apt.remove`, `apt.purge` | maybe (reinstall; purge drops config) | yes | yes | yes | yes (apt simulate) |
+| `apt.upgrade`, `apt.dist_upgrade` | hard | yes | yes | yes | yes (apt simulate) |
+| `apt.configure` (repair, `dpkg --configure -a`) | n/a (completes pending config) | maybe (maintainer scripts) | yes | yes | no (no faithful dry run) |
+| `apt.hold` | yes (unhold) | no | yes | no | synthesized (flag change) |
+| `apt.unhold` | yes (re-hold) | no | yes | yes | synthesized (flag change) |
+| `apt.update` (list refresh) | n/a (no package change) | no | **yes** | no | no (metadata refresh, not a package plan) |
 
 `apt.update` is the one operation an agent runs autonomously by default — but
 "autonomous" means "no human approval", **not** "unprivileged": it still runs
@@ -134,23 +146,43 @@ at the prompt. Options considered:
    More moving parts and a persistent attack surface; only worth it if
    per-call `pkexec` latency proves to matter.
 
-**Recommendation:** option 2 for v1, with a strict split of duties. A single
-polkit action namespace (e.g. `ai.cornball.runix.apt.manage`) gates a small
-Runix apt helper launched with `pkexec`. The helper does **only the effect**: it
-validates its arguments, takes the dpkg lock, issues the apt/dpkg transaction,
-and returns a structured result. It writes **no audit** and evaluates **no R**.
+**Recommendation:** option 2 for v1, with a strict split of duties and
+**verb-level** authorization enforced on the privileged side.
 
-Everything around the effect is owned by the **unprivileged** R caller, exactly
-as the rsystemd path works: the caller opens the durable intent through the
-broker (so the audit actor is the real caller via `SO_PEERCRED`, never root),
-invokes the helper for the effect, verifies the post-state via `pkgstate`, and
-closes the outcome on the same broker interaction. A privileged helper that wrote
-the audit itself would either record the actor as root or be unable to close the
-caller's process-bound broker receipt at all. Denial at the `pkexec`/polkit gate
-raises `runix_unauthorized`; no new resident daemon.
+*Authorization is per risk class, in polkit, not in R.* A single umbrella action
+would collapse the boundary: if `apt.update` can be authorized non-interactively
+under it, the same action authorizes `install`/`remove` for anyone who invokes
+the helper directly. So each risk class gets its **own polkit action and
+entrypoint** — e.g. `ai.cornball.runix.apt.update` (policy may allow it
+non-interactively), `ai.cornball.runix.apt.install`, `...apt.remove`
+(`auth_admin`), `...apt.configure`, `...apt.hold`/`...apt.unhold` — and the
+helper checks the action for the exact verb it was asked to perform.
+`approval_required` is thus a real gate at the privileged boundary, not a flag in
+bypassable R code: a caller who skips the R layer and invokes the helper directly
+still meets the correct per-verb polkit check.
+
+*The helper enforces the whole policy independently; it never trusts the caller's
+preview.* Before acting, the native helper **recomputes the full apt
+transaction** and enforces, on the trusted side, rapt ownership over the whole
+computed set, holds, protected/essential packages, and the allowed option set.
+The unprivileged preview is advisory only. The protocol is narrow and
+non-evaluating: an enumerated verb plus validated, typed arguments (package names
+matched to a strict pattern), a **sanitized environment**, **no shell or R
+evaluation**, and **no pass-through apt flags or config paths** — the helper
+chooses apt's options; the caller cannot inject `-o`/`-c`/`--force*`.
+
+*The helper does only the effect; the unprivileged caller owns the audit.* The
+caller opens the durable intent through the broker (audit actor = the real caller
+via `SO_PEERCRED`, never root), invokes the helper, verifies post-state via
+`pkgstate`, and closes the outcome on the same broker interaction — a privileged
+helper that audited itself would record root or be unable to close the caller's
+process-bound receipt. The lock is **apt's own**: the helper runs apt with
+`-o DPkg::Lock::Timeout=<n>` and lets apt acquire the dpkg frontend lock; it does
+not pre-acquire that lock itself (which would deadlock against apt). Denial at the
+polkit gate raises `runix_unauthorized`; no new resident daemon.
 
 The authorization *descriptor* recorded in the audit (`authorized_via`) names the
-polkit action actually checked, exactly as the systemd path records its
+per-verb polkit action actually checked, exactly as the systemd path records its
 `org.freedesktop.systemd1.*` action.
 
 ### Interactive vs machine mode: the approval boundary
@@ -291,16 +323,17 @@ bounded domain and refuses to step outside it, so two managers never fight over
 the same dpkg state and a mutation can never brick the host.
 
 - **rapt's `r-*` domain is off-limits, checked across the whole transaction.**
-  `rapt` owns the r2u R-package packages, identified by its exact predicate
-  (`^r-[a-z]+-[a-z0-9.]+$`, `rapt` `r-pkg/R/manager.R`). The general-apt helper
-  **refuses** any operation that would install, remove, or upgrade a package rapt
-  owns; those go through rapt. Two rules make this sound: (a) use rapt's *exact*
-  predicate — shared from rapt, not re-copied, so the two never drift — and (b)
-  apply it to **every package in the computed transaction**, not only the
-  requested target, since apt pulls dependencies: an operation on a non-`r-`
-  package that would drag in or remove an `r-` package still crosses the
-  boundary. A cross-domain transaction is refused typed
-  (`runix_package_not_owned`), never silently retargeted or partially applied.
+  `rapt` owns the r2u R-package packages, identified by the predicate
+  `^r-[a-z]+-[a-z0-9.]+$` (as `rapt` applies it in `r-pkg/R/manager.R`). rapt is
+  **not modified** by this contract, so the predicate is **pinned here** and kept
+  honest by a **cross-repo conformance test** asserting this contract's pattern
+  still matches rapt's — a drift alarm, not a shared import. Two rules make
+  ownership sound: (a) the pinned predicate is byte-for-byte rapt's; and (b) it is
+  applied to **every package in the computed transaction**, not only the requested
+  target, since apt pulls dependencies — an operation on a non-`r-` package that
+  would drag in or remove an `r-` package still crosses the boundary. A
+  cross-domain transaction is refused typed (`runix_package_not_owned`), never
+  silently retargeted or partially applied.
 - **Holds are honored.** A package under `apt-mark hold` (or pinned to refuse the
   change) is not overridden; the blocked mutation is surfaced with the hold in
   `observed`, never silently unheld. Clearing a hold is its own explicit, audited
@@ -323,9 +356,20 @@ owned/held/protected in between is caught, not acted on.
 
 Consistent with the Phase 2 mutation discipline:
 
-- **Preview** uses apt's simulate (`apt-get -s` / `--simulate`): it computes
-  and returns the plan (packages added/removed/held, download size) and
-  issues no effect. A preview is audited with `effect_issued = FALSE`.
+- **Preview** is per operation and honest about what it can show (see the
+  `preview_available` column):
+  - **Package transactions** (`install`/`remove`/`purge`/`upgrade`) use apt's
+    simulate (`apt-get -s`): the real plan (packages added/removed/held, download
+    size), no effect.
+  - **`apt.hold`/`apt.unhold`** have no apt simulation; the preview is a
+    *synthesized* selection-flag before/after, marked as synthesized, not an apt
+    plan.
+  - **`apt.configure`** has no faithful dry run (`dpkg --configure -a` cannot be
+    simulated); the preview reports the *pending-configuration set* it would act
+    on and is explicit that the repair itself is not simulated.
+  - **`apt.update`** is not a package transaction; its preview is which sources
+    would be refreshed, not a package plan.
+  Any preview is audited with `effect_issued = FALSE`.
 - **Idempotence.** Installing a package already at the candidate version, or
   removing an absent package, is a `no_op`: no effect issued, `changed =
   FALSE`. `changed` (functional effect) and `state_changed` (raw observed
@@ -356,11 +400,14 @@ the A1 "hard death" hazard, now over a package transaction), the durable record
 is left with an execution **intent but no outcome** (its `correlation_id` open),
 while dpkg may be part-applied. Detectable, not self-healing:
 
-- **Detection (v1).** Open intents are found by **scanning the durable sink**
-  (root-readable JSONL) for an intent with no matching outcome for its
-  `correlation_id` — the broker exposes **no query API**, so discovery is a read
-  of the evidence, not a broker call. As in A1 gate 6, Runix *detects* the open
-  intent and surfaces it as unreconciled; it does not silently close it.
+- **Detection (v1) is root-only, and in v1 explicitly manual.** The durable sink
+  is root-owned, mode `0640`, so an unprivileged Runix process cannot scan it and
+  the broker exposes **no query API**. v1 detection is therefore a **root
+  operator** (or a small root-only inspection command) reading the sink for an
+  intent with no matching outcome for its `correlation_id` — not an unprivileged
+  auto-scan, and not self-healing. As in A1 gate 6 the open intent is surfaced,
+  not silently closed. A first-class root-only "open intents" query is the natural
+  follow-up, pairing with the broker's missing query API.
 - **The dead receipt cannot be closed.** The originating process is gone; its
   broker binding and peer identity cannot be reused, so its `correlation_id` can
   never receive an outcome. A durable reconciliation cannot append to it — it
@@ -408,8 +455,9 @@ caller** (not the helper):
   invoking the helper — so before any lock is taken or effect issued. If it
   cannot persist, abort before touching the system. The actor is the caller's
   kernel identity (`SO_PEERCRED`), never root.
-- **Effect** is the helper's only job (it takes the dpkg lock and issues the
-  transaction); the helper writes no audit.
+- **Effect** is the helper's only job — it recomputes and policy-checks the
+  transaction, then runs apt with `-o DPkg::Lock::Timeout` so *apt* acquires the
+  frontend lock and issues it; the helper writes no audit.
 - **Outcome** closed by the caller on the same broker interaction, with the real
   `effect_issued`, the `observed` post-state read back from `pkgstate`,
   `outcome`, `elapsed`, and the same `correlation_id`. `audit_persisted` is
@@ -464,11 +512,11 @@ Against an injectable runner, lock, and audit sink:
     so v1 provably cannot rely on them — the deferred features are gated on the
     schema extension.
 12. Interrupted transaction: an execution whose outcome is never written leaves
-    an open intent with no matching outcome for its `correlation_id`, found by
-    **scanning the sink** (the broker has no query API) and surfaced as
-    unreconciled; the dead `correlation_id` receives no outcome, and no
-    reconciliation record is written against the shipped broker. Repair is only
-    via the gated `apt.configure`.
+    an open intent with no matching outcome for its `correlation_id`, found by a
+    **root-only** scan of the sink (unprivileged R cannot read the `0640` sink;
+    the broker has no query API) and surfaced as unreconciled; the dead
+    `correlation_id` receives no outcome, and no reconciliation record is written
+    against the shipped broker. Repair is only via the gated `apt.configure`.
 13. Package ownership over the whole transaction: an operation whose **computed
     plan** touches any package matching rapt's exact predicate
     (`^r-[a-z]+-[a-z0-9.]+$`) — target or pulled dependency — is refused
@@ -476,6 +524,25 @@ Against an injectable runner, lock, and audit sink:
     `Essential`/protected package is refused `runix_protected_package`; a held
     package's mutation is refused with the hold in `observed`. Each refusal still
     writes its intent record.
+
+Helper-boundary conformance (against the native helper, not just the R fixture):
+
+14. Verb-level authorization: the `apt.update` action does **not** authorize
+    `apt.install`/`apt.remove`; the helper checks the polkit action for the exact
+    verb it was asked to perform, so a caller that bypasses R and invokes the
+    helper for a gated verb still meets that verb's `auth_admin`.
+15. Independent enforcement: handed a preview that claims a plan is clean, the
+    helper still **recomputes** the transaction and refuses on ownership / holds /
+    protected packages; it rejects any pass-through apt flag or config path
+    (`-o`/`-c`/`--force*`) and any package name outside the strict pattern. The
+    unprivileged preview never authorizes the effect.
+16. Preview honesty: `preview_available` matches the table — real `apt-get -s`
+    for package transactions, a *synthesized* flag change for hold/unhold, and
+    none for `apt.configure`/`apt.update` — and every preview audits
+    `effect_issued = FALSE` and marks synthesized/none as such.
+17. Predicate drift: a cross-repo test asserts the pinned ownership predicate is
+    byte-for-byte the pattern rapt applies in `rapt` `r-pkg/R/manager.R`; drift
+    fails the test rather than silently diverging.
 
 ## Verification ladder
 
