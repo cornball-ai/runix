@@ -31,14 +31,14 @@ is acceptable only for throwaway CI, never for a daily-driver root channel.
    - a **separate archive-signing subkey** (releases are signed by the subkey);
    - an **encrypted offline backup** and a **revocation certificate**;
    - **no primary private key in GitHub**, ever.
-   - **Open decision (gates the signing tooling):** are releases **locally
-     signed** by Troy (most secure; but manual, and someone must re-sign before
-     `Valid-Until` expires), **or** does a **rotatable signing subkey live behind
-     a protected CI environment** (enables unattended publication and
-     `Valid-Until` refresh, at the cost of the subkey living in CI — revocable
-     without touching the primary)? "Human-held" alone conflicts with unattended
-     publication and `Valid-Until` refreshes; pick one before the tooling is
-     built.
+   - **Signing workflow — decided 2026-08-11: local signing by Troy.** Releases
+     are signed on Troy's machine with the offline subkey; **no signing key of
+     any kind lives in CI**. CI (or a local build) produces and stages the
+     unsigned `.deb`s and indexes; Troy signs `Release` locally (`InRelease` +
+     `Release.gpg`) and publishes the signed metadata. Consequence, designed
+     for: publication is **not unattended** and `Valid-Until` is refreshed only
+     by a manual re-sign — so the tooling makes local signing a single scripted
+     step and `Valid-Until` is sized for that cadence (see Publication).
 3. **Migrate janssonr into the unified archive.** After these amendments,
    coordinate with the janssonr session; do not maintain two long-term channels.
    The existing `Trusted: yes` janssonr repo folds into the signed archive.
@@ -125,8 +125,11 @@ Publication:
 
 - **`Acquire-By-Hash: yes`** and **SHA-256 (or stronger) indexes**.
 - **Immutable pool paths** (a `.deb`'s path never changes content).
-- A deliberate **`Valid-Until` policy** consistent with the chosen signing
-  workflow (local vs CI subkey — decision 2).
+- A deliberate **`Valid-Until`** window sized for **manual local re-signing**
+  (decision 2 = local): long enough that routine gaps between releases don't
+  lapse it, short enough to bound staleness. Each release re-signs it; a
+  calendar reminder is the backstop between releases. (Local signing means no
+  unattended refresh, so an over-short window would strand clients.)
 
 Acceptance (clean disposable VM, the reused A1 harness; source added via
 `Signed-By`, **no** `Trusted: yes`):
@@ -146,11 +149,11 @@ Acceptance (clean disposable VM, the reused A1 harness; source added via
 
 ## Sequencing
 
-1. **Signing foundation** — decide the signing workflow (decision 2); archive
-   layout with immutable pool + by-hash; `Release`/`InRelease` generation;
-   keyring package + bootstrap doc; rotation doc + `InRelease` multi-sig
-   conformance test. (Uses a throwaway test key for CI; the production key is
-   Troy's.)
+1. **Signing foundation** (workflow = local, decided) — archive layout with
+   immutable pool + by-hash; `Release`/`InRelease` generation; a single scripted
+   **local** signing step for Troy's offline subkey; keyring package + bootstrap
+   doc; rotation doc + `InRelease` multi-sig conformance test. (Conformance/CI
+   use a throwaway test key; the production key is Troy's and never enters CI.)
 2. **Debian packaging** — `debian/` per package via debhelper; `runix-stack`
    meta; source + `.buildinfo`; the graph + optionality above.
 3. **Atomic-enough publication** — staging build, by-hash, signed metadata,
@@ -159,10 +162,11 @@ Acceptance (clean disposable VM, the reused A1 harness; source added via
 
 ## Open decisions for Troy
 
-1. **Signing workflow** — local-signed releases vs a CI-hosted rotatable signing
-   subkey (gates the tooling; see decision 2).
-2. **Key generation/custody** — confirm Troy generates the offline primary + the
-   signing subkey, the encrypted backup, and the revocation certificate.
+1. ~~Signing workflow~~ — **decided: local signing** (decision 2).
+2. **Key generation/custody** — Troy generates the offline primary + the signing
+   subkey, the encrypted backup, and the revocation certificate. The plan
+   supplies the generation procedure; the private keys never enter CI or this
+   agent's hands.
 3. **janssonr migration timing** — when to fold the janssonr repo into the
    unified archive, and coordinate with that session.
 4. **Hosting** — Pages for v1 (accepted) vs object storage now.
