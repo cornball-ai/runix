@@ -125,8 +125,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 ## the seam rather than being silently stripped (which would hide the same bug
 ## the next subsystem repeats).
 .BROKER_RESERVED_KEYS <- c("schema_version", "record_type", "correlation_id",
-                           "phase", "host", "pid", "actor", "time", "binding",
-                           "broker")
+                           "phase", "host", "pid", "actor", "time",
+                           "binding", "broker")
 
 .broker_reserved_in <- function(record) {
     if (!is.list(record) || is.null(names(record))) {
