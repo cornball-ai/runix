@@ -325,7 +325,8 @@ cross-record link through today's broker.
   redeemed across a restart — and to **verify/redeem** it for the privileged
   helper before commit. This is new behaviour, not just a record key. It is a
   **mandatory v1 prerequisite, built before the helper** (see the implementation
-  order in the verification ladder); there is no weaker fallback.
+  order in the verification ladder); there is no weaker fallback. Its full design
+  is `broker-effect-receipt-contract.md`.
 
 ## Global lock and concurrency
 
