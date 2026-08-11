@@ -52,8 +52,22 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     r-base-core
 echo "R: $(R --version | head -1)"
 
-log "install the whole stack from LOCAL files (apt resolves the graph)"
+log "verify build provenance + artifact integrity before installing"
 cd "$SRC"
+[ -f SHA256SUMS ] || { echo "refusing: no SHA256SUMS in $SRC (build via build-debs.sh)" >&2; exit 2; }
+[ -f MANIFEST ]   || { echo "refusing: no MANIFEST in $SRC" >&2; exit 2; }
+sha256sum -c SHA256SUMS
+prov=$(awk -F': ' '/^provenance:/{print $2; exit}' MANIFEST)
+echo "provenance: ${prov:-unknown}"
+# Refuse a build made from dirty/untracked sources unless explicitly overridden:
+# a recorded commit that does not identify the artifact is not provenance.
+if [ "$prov" != PINNED ] && [ -z "${ALLOW_UNPINNED:-}" ]; then
+    echo "refusing to install a non-PINNED build (dirty source trees)." >&2
+    echo "  Commit the sources and rebuild, or set ALLOW_UNPINNED=1 to override." >&2
+    exit 2
+fi
+
+log "install the whole stack from LOCAL files (apt resolves the graph)"
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ./runix-stack_*.deb ./r-cornball-*.deb ./runix-audit-broker_*.deb
 

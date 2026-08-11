@@ -1,0 +1,144 @@
+name: packaging
+
+# The A0-dev packaging path is invisible to the ordinary package CI: deploy/ is
+# .Rbuildignore'd, so `R CMD check` never builds a .deb. This workflow is that
+# missing gate -- it builds all six artifacts, asserts their metadata, installs
+# the whole stack from local files, and drives a real broker-backed mutation on
+# the apt-installed stack. It should be a required check on master.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-install-accept:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prove systemd is the service manager
+        run: test -d /run/systemd/system
+
+      # R 4.6 from CRAN (Noble ships 4.3; the janssonr .deb needs >= 4.6). Key
+      # scoped to this source via Signed-By -- never global trusted.gpg.d.
+      - name: CRAN R 4.6 (scoped key) + build/deploy toolchain
+        run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
+            | sudo tee /etc/apt/keyrings/cran-ubuntu.asc >/dev/null
+          sudo tee /etc/apt/sources.list.d/cran.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: https://cloud.r-project.org/bin/linux/ubuntu
+          Suites: noble-cran40/
+          Signed-By: /etc/apt/keyrings/cran-ubuntu.asc
+          Enabled: yes
+          EOF
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            r-base-core r-base-dev debhelper fakeroot dpkg-dev lintian jq \
+            libjansson-dev pkg-config git build-essential
+
+      - name: Install janssonr from the cornball apt repository
+        run: |
+          sudo tee /etc/apt/sources.list.d/janssonr.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: https://cornball-ai.github.io/janssonr
+          Suites: noble
+          Components: main
+          Trusted: yes
+          Enabled: yes
+          EOF
+          sudo apt-get update -qq
+          sudo apt-get install -y r-cornball-janssonr
+
+      # The sibling R packages and the broker come from their public repos; the
+      # broker is pinned to its immutable release tag.
+      - name: Clone the sibling sources
+        run: |
+          for p in pkgstate rsystemd rctl; do
+            git clone --depth 1 "https://github.com/cornball-ai/$p.git" "${RUNNER_TEMP}/$p"
+          done
+          git clone --depth 1 --branch v0.0.1 \
+            https://github.com/cornball-ai/runix-audit-broker.git \
+            "${RUNNER_TEMP}/runix-audit-broker"
+
+      - name: Build all six .debs (debhelper orchestrator)
+        run: |
+          SRC_pkgstate="${RUNNER_TEMP}/pkgstate" \
+          SRC_rsystemd="${RUNNER_TEMP}/rsystemd" \
+          SRC_rctl="${RUNNER_TEMP}/rctl" \
+          SRC_broker="${RUNNER_TEMP}/runix-audit-broker" \
+          ./deploy/build-debs.sh "${RUNNER_TEMP}/dist"
+
+      - name: Metadata assertions (arch, deps, symlink, closure, provenance)
+        run: |
+          D="${RUNNER_TEMP}/dist"
+          test "$(ls -1 "$D"/*.deb | wc -l)" -eq 6
+          # runix: compiled amd64, declares the R interpreter + ABI directly
+          dpkg-deb -f "$D"/r-cornball-runix_*_amd64.deb Architecture | grep -qx amd64
+          dpkg-deb -f "$D"/r-cornball-runix_*_amd64.deb Depends | grep -qw 'r-api-4.0'
+          dpkg-deb -f "$D"/r-cornball-runix_*_amd64.deb Depends | grep -q 'r-base-core (>= 4.6.0)'
+          # rctl: /usr/bin/rctl -> the Rscript launcher, and NO littler dep
+          dpkg-deb -c "$D"/r-cornball-rctl_*_all.deb | grep -q 'usr/bin/rctl -> .*rctl-rscript'
+          if dpkg-deb -f "$D"/r-cornball-rctl_*_all.deb Depends | grep -qw littler; then
+            echo "rctl must not depend on littler"; exit 1
+          fi
+          # metapackage: exact-versioned closure over the built stack
+          dpkg-deb -f "$D"/runix-stack_*_all.deb Depends | grep -q 'r-cornball-rctl (= '
+          # provenance pinned (CI source trees are clean) + checksums verify
+          grep -qx 'provenance: PINNED' "$D/MANIFEST"
+          ( cd "$D" && sha256sum -c SHA256SUMS )
+          # lintian: informational (R packages trip many style tags); the hard
+          # gates are the explicit assertions above.
+          lintian "$D"/*.deb || true
+
+      - name: Install the whole stack from local files (install-debs.sh)
+        run: bash deploy/canary/install-debs.sh "${RUNNER_TEMP}/dist"
+
+      # The packaging deliverable's real proof: an UNPRIVILEGED principal drives a
+      # service mutation through the apt-installed rctl -> the socket-activated
+      # broker -> a durable SYSTEM intent+outcome whose actor is the caller's
+      # kernel identity (SO_PEERCRED), not a payload field.
+      - name: Broker-backed mutation gate (apt-installed stack)
+        run: |
+          sudo useradd -m -u 2001 canary
+          sudo tee /etc/systemd/system/runix-canary.service >/dev/null <<'EOF'
+          [Unit]
+          Description=packaging CI canary target (harmless)
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/sleep infinity
+          Restart=no
+          EOF
+          sudo tee /etc/polkit-1/rules.d/49-runix-canary.rules >/dev/null <<'EOF'
+          polkit.addRule(function(action, subject) {
+              if (action.id == "org.freedesktop.systemd1.manage-units" &&
+                  subject.user == "canary") {
+                  return action.lookup("unit") == "runix-canary.service"
+                      ? polkit.Result.YES : polkit.Result.NO;
+              }
+          });
+          EOF
+          sudo systemctl daemon-reload
+          sudo systemctl start runix-canary.service
+          sudo systemctl restart polkit
+          # capabilities: broker-backed system durability for the unprivileged principal
+          cap=$(sudo -u canary rctl capabilities --json)
+          echo "$cap" | jq -e '.result.audit.system_durable_audit == true and .result.audit.audit_scope == "system"'
+          # a real mutation -> durable intent+outcome, actor derived from uid 2001
+          res=$(sudo -u canary rctl services restart runix-canary.service --json)
+          echo "$res" | jq -e '.ok == true and .result.audit.actor == "uid:2001"'
+          cid=$(echo "$res" | jq -r '.result.correlation_id')
+          sleep 1
+          recs=$(sudo grep -F "$cid" /var/log/runix/audit.jsonl)
+          echo "$recs" | jq -rs '[.[]|select(.phase=="intent")]|length'  | grep -qx 1
+          echo "$recs" | jq -rs '[.[]|select(.phase=="outcome")]|length' | grep -qx 1
+          echo "$recs" | jq -rs '[.[]|select(.phase=="intent")][0].broker.peer.uid' | grep -qx 2001
+          echo "packaging mutation gate OK"

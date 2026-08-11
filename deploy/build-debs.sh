@@ -111,10 +111,16 @@ gen_changelog() {   # <debname> <version> <treedir>
 }
 
 collect() {         # <debname> <version> : move build products into $dist
+    found_deb=0
     for f in "$work/$1_$2_"*.deb "$work/$1_$2.dsc" "$work/$1_$2.tar."* \
              "$work/$1_$2_"*.buildinfo "$work/$1_$2_"*.changes; do
-        [ -e "$f" ] && mv "$f" "$dist/"
+        [ -e "$f" ] || continue
+        case "$f" in *.deb) found_deb=1 ;; esac
+        mv "$f" "$dist/"
     done
+    # Fail closed: a build that produced no binary is an error, not a skip.
+    [ "$found_deb" = 1 ] || {
+        echo "ERROR: no .deb produced for $1 ($2)" >&2; exit 1; }
 }
 
 build_r_pkg() {     # <srcdir> <debname>
@@ -134,13 +140,16 @@ build_r_pkg() {     # <srcdir> <debname>
     gen_changelog "$deb" "$dver" "$btree"
     ( cd "$btree" && dpkg-buildpackage -us -uc -d )
     collect "$deb" "$dver"
+    printf '%s %s\n' "$deb" "$dver" >> "$work/versions"
     rm -rf "$btree"
     echo "built $deb ($dver)"
 }
 
 build_broker() {    # <srcdir>
     src=$1
-    [ -d "$src" ] || { echo "skip broker: $src not found"; return 0; }
+    # Fail closed: a missing broker source is an error -- the metapackage
+    # depends on the broker, so silently skipping it would ship a broken stack.
+    [ -d "$src" ] || { echo "ERROR: broker source '$src' not found" >&2; exit 1; }
     require_clean "$src" runix-audit-broker
     ver=$(awk 'NR==1{gsub(/[()]/,"",$2); print $2; exit}' "$src/debian/changelog")
     btree="$work/runix-audit-broker"
@@ -148,12 +157,28 @@ build_broker() {    # <srcdir>
     ( cd "$src" && git archive --format=tar HEAD ) | tar -x -C "$btree"
     ( cd "$btree" && dpkg-buildpackage -us -uc -d )
     collect runix-audit-broker "$ver"
+    printf 'runix-audit-broker %s\n' "$ver" >> "$work/versions"
     rm -rf "$btree"
     echo "built runix-audit-broker ($ver)"
 }
 
-build_meta() {      # runix-stack: debian/ only, plus a placeholder source file
+build_meta() {      # runix-stack: EXACT-version closure over the stack just built
     deb=runix-stack; ver="${stack_ver}${suf}"
+    # Pre-0.1, exact (=) versions are safest: the metapackage then identifies the
+    # precise stack this run built (and the canary proved), not "some newer set".
+    lookup() { awk -v k="$1" '$1==k{print $2; exit}' "$work/versions"; }
+    rctl_v=$(lookup r-cornball-rctl)
+    pkgstate_v=$(lookup r-cornball-pkgstate)
+    rsystemd_v=$(lookup r-cornball-rsystemd)
+    broker_v=$(lookup runix-audit-broker)
+    for nv in "rctl:$rctl_v" "pkgstate:$pkgstate_v" "rsystemd:$rsystemd_v" \
+              "broker:$broker_v"; do
+        [ -n "${nv#*:}" ] || {
+            echo "ERROR: metapackage closure missing version for ${nv%%:*}" >&2
+            exit 1; }
+    done
+    RUNIX_STACK_DEPENDS="r-cornball-rctl (= $rctl_v), r-cornball-pkgstate (= $pkgstate_v), r-cornball-rsystemd (= $rsystemd_v), runix-audit-broker (= $broker_v)"
+    export RUNIX_STACK_DEPENDS
     btree="$work/$deb"
     mkdir -p "$btree/debian"
     cp -a "$tpl/$deb/." "$btree/debian/"
@@ -164,6 +189,7 @@ build_meta() {      # runix-stack: debian/ only, plus a placeholder source file
     collect "$deb" "$ver"
     rm -rf "$btree"
     echo "built $deb ($ver)"
+    echo "  closure: $RUNIX_STACK_DEPENDS"
 }
 
 safe_prepare_dist "$dist"
@@ -176,10 +202,30 @@ build_r_pkg "$SRC_rctl"     r-cornball-rctl
 build_broker "$SRC_broker"
 build_meta
 
-# Manifest: pinned source commits + artifact SHA-256 sums (A0-dev provenance).
+# Fail closed: exactly the six expected binaries must be present.
+missing=
+for p in r-cornball-runix r-cornball-pkgstate r-cornball-rsystemd r-cornball-rctl \
+         runix-audit-broker runix-stack; do
+    set -- "$dist/${p}_"*.deb
+    [ -e "$1" ] || missing="$missing $p"
+done
+[ -z "$missing" ] || {
+    echo "ERROR: build did not produce .debs for:$missing" >&2; exit 1; }
+count=$(ls -1 "$dist"/*.deb | wc -l)
+[ "$count" -eq 6 ] || {
+    echo "ERROR: expected 6 .debs, found $count in $dist" >&2; exit 1; }
+
+# Provenance: PINNED only if every source tree was clean at build time.
+prov=PINNED
+for d in "$SRC_runix" "$SRC_pkgstate" "$SRC_rsystemd" "$SRC_rctl" "$SRC_broker"; do
+    [ -z "$(git -C "$d" status --porcelain 2>/dev/null)" ] || prov=UNPINNED
+done
+
+# MANIFEST: human-readable provenance (source commits + clean/dirty).
 {
     printf '# Runix A0-dev build manifest\n'
-    printf '# built: %s\n\n' "$(date -R)"
+    printf '# built: %s\n' "$(date -R)"
+    printf 'provenance: %s\n\n' "$prov"
     printf '# source commits\n'
     for pair in "runix:$SRC_runix" "pkgstate:$SRC_pkgstate" \
                 "rsystemd:$SRC_rsystemd" "rctl:$SRC_rctl" \
@@ -192,11 +238,15 @@ build_meta
             printf '%-20s %s  clean\n' "$name" "$rev"
         fi
     done
-    printf '\n# artifact sha256\n'
+    printf '\n# verify artifacts with:  sha256sum -c SHA256SUMS\n'
 } > "$dist/MANIFEST"
-( cd "$dist" && sha256sum *.deb *.dsc *.tar.* 2>/dev/null ) >> "$dist/MANIFEST"
+
+# SHA256SUMS: machine-checkable hashes of EVERY emitted artifact -- binaries,
+# source packages, .buildinfo, and .changes.
+( cd "$dist" && sha256sum *.deb *.dsc *.tar.* *.buildinfo *.changes 2>/dev/null ) \
+    > "$dist/SHA256SUMS"
 
 echo
-echo "artifacts in $dist:"
+echo "artifacts in $dist (provenance: $prov):"
 ls -1 "$dist"/*.deb
-echo "manifest: $dist/MANIFEST"
+echo "manifest: $dist/MANIFEST   checksums: $dist/SHA256SUMS"
