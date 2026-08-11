@@ -89,21 +89,25 @@ Paths that issue no effect and can persist their single record do not need
 the two-phase split, but they use the same `correlation_id` and schema.
 
 **Approval boundary interaction.** For a machine-mode gated operation
-(`apt-mutation-boundary-contract.md`), the intent record is written and made
-durable, then the call returns `approval_required` carrying that
-`correlation_id` and issues no effect. This is exactly why intent-first
-matters: a later out-of-band authorization references a real, recorded
-operation, and the authorized resume attaches its outcome record to the same
-`correlation_id`. An approved-and-resumed operation is one intent plus one
-outcome, as usual; a never-approved one is an intent that stays open, which is
-an honest, queryable state rather than a silent effect.
+(`apt-mutation-boundary-contract.md`), the operation writes a **complete**
+two-phase pair — an intent and an outcome of `approval_required` with
+`effect_issued = FALSE`, sharing one `correlation_id` — and returns. It issues no
+effect and does **not** stay open: the record is closed, honest, and queryable
+(an *open* intent is the crash case above, not the approval case).
+
+A human applies it by running a **fresh interactive operation** that recomputes
+and re-authorizes from current state — a *separate* operation with its own
+`correlation_id`. Because the sink is append-only evidence and the broker mints
+and owns the `correlation_id` per interaction, a later, different process cannot
+reuse or attach an outcome to the request's `correlation_id`. Unattended
+resume-by-id — one logical operation spanning the two — is **deferred**: it needs
+a durable approval store plus a broker schema extension
+(`apt-mutation-boundary-contract.md`), and is never a same-`correlation_id`
+resume.
 
 The `correlation_id` is an **identifier, not a capability**: it makes the
-operation auditable and joinable, but possessing it authorizes nothing. The
-resume path re-checks host/actor binding, authorization, parameters and
-preview hash, expiry, and current pre-state before proceeding
-(`apt-mutation-boundary-contract.md`); the intent record is not a bearer
-token and is never treated as proof that authorization happened.
+operation auditable and joinable, but possessing it authorizes nothing and is
+never treated as proof that authorization happened.
 
 ## Record schema (persisted line)
 

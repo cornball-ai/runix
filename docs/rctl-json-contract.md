@@ -114,19 +114,19 @@ codes 2, 3, and 4 (machine mode never leaves stdout empty).
 machine mode never blocks on an interactive password (see
 `apt-mutation-boundary-contract.md`). It returns exit code 4 with an
 error-shaped envelope whose class is `runix_approval_required`, carrying the
-operation identity (`correlation_id`) and the computed preview, and issues no
-effect. The `correlation_id` is an identifier, not a bearer token: it names
-the operation for approval and audit, but resume revalidates authorization,
-host/actor binding, parameters/preview hash, expiry, and pre-state before
-executing (`apt-mutation-boundary-contract.md`), so holding it authorizes
-nothing. This is neither a failure nor a denial: `runix_unauthorized` (exit 1)
-is an actual polkit denial, while `runix_approval_required` (exit 4) is a
-well-formed request pending sign-off, resumable by identity. It rides the
-existing error-envelope shape, so a consumer that does not recognize the
-class degrades gracefully; whether it later earns a dedicated top-level
-discriminator is an implementation call to settle when the mutation envelope
-lands. `retryable` is `false` (the resolution is approve-and-resume, not
-retry-the-call).
+computed preview and the operation's `correlation_id` for audit reference, and
+issues no effect. This is neither a failure nor a denial: `runix_unauthorized`
+(exit 1) is an actual polkit denial, while `runix_approval_required` (exit 4) is
+a well-formed request pending sign-off. **In v1 it is terminal:** the durable
+record is a complete intent + `approval_required` outcome (one `correlation_id`,
+`effect_issued = FALSE`), and a human applies it by running a **fresh
+interactive command** that recomputes and re-authorizes from current state — not
+by resuming an id. Unattended resume-by-id is deferred (it needs a durable
+approval store and a broker schema extension; see
+`apt-mutation-boundary-contract.md`), so the `correlation_id` here is audit
+evidence, never a bearer token. It rides the existing error-envelope shape, so a
+consumer that does not recognize the class degrades gracefully. `retryable` is
+`false` (the resolution is approve-and-re-run, not retry-the-call).
 
 ## Deterministic encoding
 
