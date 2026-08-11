@@ -61,12 +61,39 @@ new_correlation_id <- function(clock = sys_clock(), pid = Sys.getpid(),
     }
 }
 
+#' The caller's normalized audit actor
+#'
+#' The \code{"uid:<numeric uid>"} identity a local sink stamps on an audit
+#' record. \code{actor} is authority-derived framing metadata, not domain
+#' content: a file/memory sink derives it here from the writing process, and
+#' the audit broker derives it from the peer's kernel-verified credentials
+#' (\code{SO_PEERCRED}). A subsystem never supplies \code{actor} in a record it
+#' hands a sink (the broker rejects a client-supplied one; see
+#' \code{audit-broker-contract.md}). The numeric uid is authoritative; a display
+#' name is deliberately not part of the value.
+#'
+#' @return A length-1 character \code{"uid:<n>"}, or \code{"uid:unknown"} when
+#'   the uid cannot be read.
+#' @examples
+#' audit_actor()
+#' @export
+audit_actor <- function() {
+    uid <- tryCatch(as.integer(system2("id", "-u", stdout = TRUE,
+                                       stderr = FALSE)[1L]),
+                    error = function(e) NA_integer_)
+    paste0("uid:", if (length(uid) != 1L || is.na(uid)) "unknown" else uid)
+}
+
 ## Merge the framing fields onto a domain record in deterministic key order.
 ## `record_type` distinguishes a user-visible audit event from a sink's internal
-## records (e.g. the broker's checkpoints); see durable-audit-contract.md.
+## records (e.g. the broker's checkpoints); `actor` is authority-derived framing
+## (like host/pid/time), stamped here for a local sink from the writing process
+## -- never taken from the subsystem's domain content. See
+## durable-audit-contract.md.
 .finish_record <- function(rec, cid, phase, time) {
     c(list(schema_version = 1L, record_type = "audit", correlation_id = cid,
-            phase = phase, host = .nodename(), pid = Sys.getpid()),
+            phase = phase, host = .nodename(), pid = Sys.getpid(),
+            actor = audit_actor()),
         rec,
         list(time = time))
 }

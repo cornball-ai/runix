@@ -56,8 +56,12 @@ weaker guarantee is explicitly accepted and advertised as such (its own
    system sink; a caller-supplied destination path is rejected. The caller
    never chooses where root writes.
 3. **`SO_PEERCRED` identity, never payload identity.** The actor comes from
-   the connected peer's kernel-verified credentials; any actor field in the
-   payload is ignored and overwritten. The **full** identity is persisted and
+   the connected peer's kernel-verified credentials; a client-supplied actor
+   (or any other identity/framing field) in the payload is **forbidden and
+   rejected `schema_invalid`**, not silently accepted and overwritten. Fail
+   closed: authoritative identity is sink-derived, so a request that even
+   attempts to assert it is refused rather than quietly corrected. The **full**
+   identity is persisted and
    matched, not UID alone: `uid`, `gid`, `pid`, plus the boot id and the
    peer's process start time, so a reused PID (or a post-reboot PID
    collision) cannot impersonate the original opener. Weakening this to
@@ -186,10 +190,13 @@ implements a spec rather than inventing one.
   intents only, string `accepted_time_us`). `actor` is the normalized
   `uid:<numeric uid>`; the top-level `pid` is the peer PID; `time` is RFC 3339.
   Carry-forward is a `broker_checkpoint` `record_type`, never an audit `phase`.
-- **`SO_PEERCRED` overrides all payload identity.** The full actor identity
-  (uid/gid/pid + boot id + process start time) comes from the kernel-verified
-  peer credentials; any identity field in the body is ignored and
-  overwritten. A client cannot claim to be another principal.
+- **`SO_PEERCRED` is the sole source of identity; payload identity is
+  forbidden.** The full actor identity (uid/gid/pid + boot id + process start
+  time) comes from the kernel-verified peer credentials. A record that supplies
+  `actor` (or any other reserved identity/framing field) is rejected
+  `schema_invalid` — fail closed, not silently overwritten. A client cannot
+  claim to be another principal, and cannot even assert its own identity: the
+  authoritative value is derived, never accepted.
 - **The receipt `binding` authorizes exactly one narrowly-scoped action:**
   appending the outcome for *its own* intent, and only from a peer whose full
   identity matches the opener. It cannot authorize a mutation, a different
@@ -368,7 +375,8 @@ safe.
 Against a test harness that connects over the socket with controlled peer
 credentials:
 
-1. Actor is taken from `SO_PEERCRED`; a payload-supplied actor is ignored.
+1. Actor is taken from `SO_PEERCRED`; a payload-supplied actor (or any reserved
+   identity/framing field) is rejected `schema_invalid`, not accepted.
 2. A caller-supplied sink path is rejected; the broker writes only its own
    path.
 3. The broker mints the intent id; two intents never collide; a caller cannot
