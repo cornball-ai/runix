@@ -4,13 +4,15 @@ Status: contract (pre-implementation), **revised after review** (2026-08-11).
 The **first unit** of the apt-mutation arc: a new `runix-audit-broker` capability
 the privileged helper needs before it may commit a package transaction.
 
-**This revision adds:** a hardened redemption gate (uid-0 redeemer, `PKEXEC_UID`
-matched to the bound actor, private-pipe token transfer, verifier-hash
-persistence); at-most-once commit semantics under a lost response; a fully pinned
-plan digest with per-verb descriptors; an explicit receipt state machine
-(monotonic TTL, boot-id invalidation, rotation/restart recovery) and an
-effect-outcome-requires-redemption invariant; and a three-axis versioning model
-that leaves the public record schema unchanged. Sequenced ahead of the `libapt-pkg` helper and
+**This revision settles:** a hardened redemption gate (uid-0 redeemer,
+`PKEXEC_UID` matched to the bound actor, private stdin/FD token transfer, a
+constant-time SHA-256 verifier); at-most-once commit under a lost response; an
+exact plan-digest byte grammar with per-verb descriptors and golden vectors;
+concrete capability negotiation; an explicit receipt state machine
+(`CLOCK_BOOTTIME` TTL, boot-id invalidation, rotation/restart recovery); and —
+crucially — receipt enforcement is **opt-in per intent** (`effect_required`), so
+existing subsystems (rsystemd) are unaffected and the public record schema is
+unchanged. Sequenced ahead of the `libapt-pkg` helper and
 `pkgops` (see `apt-mutation-boundary-contract.md` "Verification ladder"); the
 helper is not started until this lands and is conformance-tested. Builds on
 `audit-broker-contract.md` and `PROTOCOL.md` (the broker's wire protocol and
@@ -31,7 +33,10 @@ refuses (`runix_no_intent`) if there is none valid. Two properties fall out:
    of the plan the unprivileged side previewed; at redemption the broker checks
    it against the plan the helper's atomic `libapt-pkg` resolve produced. If they
    differ — state drifted between preview and resolve — redemption fails and the
-   effect never runs. The approved plan is provably the committed plan.
+   effect never runs. The recorded preview descriptor is provably the committed
+   plan — for a gated verb that is the human-approved plan, for an autonomous one
+   (`apt.update`, holds) simply the previewed one; either way, committed == what
+   was recorded.
 
 ## Threat model (what it is and is not)
 
@@ -85,8 +90,9 @@ unprivileged R                     broker                    root helper (pkexec
   (verb) and `resource`, and a caller-supplied **`plan_hash`** (the hash of the
   unprivileged preview plan). The receipt is made durable (fsynced) as part of
   the intent, *before* the reply, and returned alongside `binding`.
-- **Transfer.** The unprivileged R passes the receipt to the helper over the
-  helper's narrow protocol (an argument, not the environment).
+- **Transfer.** The unprivileged R passes the receipt to the helper over a
+  **private stdin / file-descriptor channel**, never `argv` or the environment
+  (both are observable via `/proc`).
 - **Redeem (before commit).** The helper sends `redeem_receipt` carrying the
   receipt and the `verb`, `resource`, and `plan_hash` of the transaction its
   atomic `libapt-pkg` resolve produced. The broker verifies (below), marks the
@@ -120,9 +126,10 @@ already is), not by who presents it — but two rules keep the token from leakin
   the helper via **stdin / a private pipe**, never `argv` or the environment —
   both are observable (`/proc/<pid>/cmdline`, `/proc/<pid>/environ`, `ps`).
 - **Persist a verifier, not the token.** The broker's durable state stores only a
-  **hash** of the receipt token (a verifier), never the live token; redemption
-  hashes the presented token and compares. A reader of the sink or state cannot
-  recover a usable receipt.
+  **SHA-256 verifier** of the receipt token, never the live token; redemption
+  hashes the presented token and compares the digests in **constant time** (no
+  early exit on the first differing byte). A reader of the sink or state cannot
+  recover a usable receipt, and the comparison leaks no timing signal.
 
 The issuing caller's verified identity is bound into the receipt at issue (from
 the unprivileged `SO_PEERCRED`) and on the durable record, so "who intended this"
@@ -139,23 +146,31 @@ pinned — not left to "hash the plan":
 - **Digest schema version.** The canonical encoding carries its own version,
   independent of the wire and record schemas; a change to the descriptor format
   bumps it, and issue and redeem must use the same version.
-- **Per-verb descriptor.** A package-tuple set only fits install/remove-style
-  transactions, so each verb has a defined descriptor:
-  - `apt.install`/`remove`/`purge`/`upgrade`/`dist_upgrade`: the sorted set of
-    `(package, architecture, action, from-version, to-version, flags)` over the
-    **whole resolved transaction** — target and every pulled dependency — where
-    `action ∈ {install, upgrade, downgrade, remove, purge}` and `flags` captures
-    hold/auto/essential markers.
-  - `apt.configure`: the sorted set of `(package, architecture)` pending
-    configuration.
-  - `apt.hold`/`apt.unhold`: the sorted set of `(package, from-hold-state,
-    to-hold-state)`.
-  - `apt.update`: no package transaction — the descriptor is the sorted set of
-    source entries `(uri, suite, components)` to be refreshed.
-- **Canonical encoding:** fields in a fixed order, tuples sorted, explicit
-  separators, versions as exact strings (never locale-formatted), and a stable
-  empty representation. Pinned in a shared spec both the R side and the C helper
-  build against, with shared test vectors.
+- **Canonical byte grammar (exact).** A descriptor is a list of records; each
+  record is its fields in the fixed order below joined by US (`0x1f`); records are
+  sorted bytewise ascending and joined by RS (`0x1e`); the whole is prefixed by
+  `plan_schema` then the verb (`"1" 0x1e "apt.install" 0x1e` then the records).
+  All values are UTF-8, exact (never locale-formatted); a missing version is the
+  empty string; an empty descriptor is the prefix followed by nothing.
+  `plan_hash` is the lowercase hex SHA-256 of these bytes.
+- **Fields per verb** (record shape):
+  - install/remove/purge/upgrade/dist_upgrade — over the **whole resolved
+    transaction** (target and every pulled dependency):
+    `package │ architecture │ action │ from_version │ to_version │ flags`, where
+    `action ∈ {install, upgrade, downgrade, remove, purge}`, versions are exact
+    dpkg version strings (`from` empty for a fresh install, `to` empty for a
+    removal), and `flags` is a bytewise-sorted comma list from the fixed enum
+    `{hold, auto, essential, protected}`.
+  - `apt.configure`: `package │ architecture │ current_version │ state`, `state`
+    from the fixed dpkg status enum (`unpacked`, `half-configured`, …).
+  - `apt.hold`/`apt.unhold`: `package │ from_state │ to_state`, `state ∈
+    {hold, install}` (dpkg selection states).
+  - `apt.update`: `uri │ suite │ components │ options` — no package fields;
+    `components` is a bytewise-sorted comma list and `options` a bytewise-sorted
+    `k=v` comma list of the source's apt options (`signed-by`, `arch`, …).
+- **Golden vectors** for each verb (including empty and single-record cases) are
+  part of the shared fixture corpus, so R and the C helper are proven to produce
+  identical bytes and the same digest — the encoding is pinned by test, not prose.
 
 The unprivileged preview yields the issue-time digest; the helper's atomic
 `libapt-pkg` resolve yields the redeem-time digest. Equality is the TOCTOU/drift
@@ -214,11 +229,12 @@ redeemed and expired are terminal. There is no un-redeem.
   receipt is `receipt_redeemed`; of an expired one, `receipt_expired`.
 - **Single use.** A second `redeem_receipt` for a redeemed receipt is refused, so
   a replayed receipt cannot authorize a second commit.
-- **TTL is same-boot monotonic.** The TTL is measured on `CLOCK_MONOTONIC` from a
-  broker-assigned issue time, never client input. A receipt also records the
-  **boot id**; on a **boot-id change** every outstanding receipt is invalid
-  regardless of wall-clock — monotonic time resets across a reboot, so a
-  cross-reboot TTL is meaningless. A redeem whose boot id differs from the
+- **TTL uses `CLOCK_BOOTTIME`.** The TTL is measured on `CLOCK_BOOTTIME` — which,
+  unlike `CLOCK_MONOTONIC`, keeps counting across suspend, so a suspended host
+  cannot silently extend a receipt's validity — from a broker-assigned issue
+  time, never client input. A receipt also records the **boot id**; on a
+  **boot-id change** every outstanding receipt is invalid regardless of clock
+  (boot time resets across a reboot), so a redeem whose boot id differs from the
   broker's current boot id is refused (`receipt_expired`).
 - **Rotation carry-forward.** Issued, unexpired receipts are re-materialised into
   the fresh segment on rotation, alongside the open-intent checkpoints, so the
@@ -231,21 +247,24 @@ redeemed and expired are terminal. There is no un-redeem.
   redeemable; their intents are open, un-redeemed, and reconcilable. A receipt can
   never straddle a reboot.
 
-**Effect outcomes require a redemption.** A `write_outcome` carrying
-`effect_issued: true` is refused (`effect_without_receipt`) unless the intent's
-effect receipt was redeemed. This closes "commit with no redemption" from the
-outcome side too: an effect can only be recorded as issued if the broker durably
-authorized it.
+**Effect outcomes require a redemption — only when the intent opted in.** An
+intent opened with `effect_required: true` (the receipt path) refuses a
+`write_outcome` carrying `effect_issued: true` unless its receipt was redeemed
+(`effect_without_receipt`). An intent opened **without** it — every current
+caller, including the rsystemd mutation path — is unaffected: its
+`effect_issued: true` outcomes are accepted exactly as today. The receipt
+requirement is strictly opt-in per intent, so adding this capability never breaks
+an existing subsystem (a backward-compatibility test pins it).
 
 ## Wire protocol additions
 
 Extends `PROTOCOL.md` (still one request frame → one response frame):
 
 ```jsonc
-// open_intent, requesting an effect receipt
+// open_intent, requesting an effect receipt (opt-in; absent = today's behaviour)
 { "type": "open_intent",
   "record": { "operation": "apt.install", "resource": "nginx", ... },
-  "effect": { "plan_hash": "<hex>" } }        // NEW, optional
+  "effect": { "required": true, "plan_schema": 1, "plan_hash": "<hex>" } }   // NEW
 
 // open_intent response now may carry the receipt
 { "ok": true, "correlation_id": "...", "binding": "...",
@@ -257,7 +276,7 @@ Extends `PROTOCOL.md` (still one request frame → one response frame):
                                              //   never argv/env (R->helper uses stdin)
   "principal_uid": 1000,                     // original invoking uid, from PKEXEC_UID
   "effect": { "operation": "apt.install", "resource": "nginx",
-              "plan_hash": "<hex>" } }
+              "plan_schema": 1, "plan_hash": "<hex>" } }   // plan_schema must match the bound value
 
 // redeem_receipt response
 { "ok": true, "correlation_id": "...", "persisted": true }
@@ -280,10 +299,36 @@ set, so each is a two-sided contract change):
 `effect` object is bounded and typed like any other input; `plan_hash` is a
 fixed-width hex string.
 
+## Capability negotiation
+
+The extension is discoverable, not assumed. A new `capabilities` request returns
+what the broker supports, so a client learns whether receipts are available and
+which plan-digest schemas it accepts before opening an intent:
+
+```jsonc
+// capabilities request — NEW
+{ "type": "capabilities" }
+
+// capabilities response
+{ "ok": true,
+  "frame_version": 1,
+  "record_schema_version": 1,
+  "extensions": { "effect_receipt": 1 },     // absent => not supported
+  "plan_schemas": [1] }
+```
+
+- A broker without the extension omits `effect_receipt` (or does not recognise
+  the request, `unknown_request`); the client then does not use receipts.
+- `plan_schema` is chosen from `plan_schemas`, sent in **both** `open_intent`
+  (`effect.plan_schema`) and `redeem_receipt` (`effect.plan_schema`), and **bound
+  into the receipt** at issue. Redemption refuses a `plan_schema` differing from
+  the bound value (`receipt_mismatch`), so issue and redeem can never disagree on
+  how the digest was computed.
+
 ## Versioning
 
-Three independent version axes; this change touches only some, and existing
-clients stay compatible:
+Three independent version axes, surfaced by `capabilities` above; this change
+touches only some, and existing clients stay compatible:
 
 - **Frame-protocol version** (the 1-byte frame `version`, `PROTOCOL.md`):
   **unchanged** — framing is identical.
@@ -346,6 +391,13 @@ existing frames do.
     drops before the reply; the receipt is spent (a retry gets `receipt_redeemed`)
     and a helper that never saw `redeem_ok` does not commit — at-most-once,
     reconciled as not applied.
+15. Backward compatibility: an intent opened **without** `effect` (e.g. an
+    rsystemd mutation) accepts an `effect_issued: true` outcome with no receipt,
+    exactly as today; only an `effect_required: true` intent gates the outcome on
+    a redemption. No existing subsystem is broken.
+16. plan_schema binding: a `redeem_receipt` whose `plan_schema` differs from the
+    value bound at issue is refused `receipt_mismatch`; issue and redeem cannot
+    disagree on how the digest was computed.
 
 ## Out of scope here
 
