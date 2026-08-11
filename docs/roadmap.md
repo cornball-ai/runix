@@ -120,6 +120,20 @@ path.
   consolidated onto the `janssonr` binding (`r-cornball-janssonr`, apt-served),
   matching the C broker's Jansson lineage: strict parsing, a documented
   numeric-semantic contract, and exact envelope goldens.
+- **A1 canary — runtime acceptance on a real host** (`deploy/canary-a1-runbook.md`)
+  — the whole unprivileged mutation boundary proven on a disposable systemd/polkit
+  KVM guest: 7 gates (broker-backed system durability, preview no-effect,
+  InvocationID advancement, durable intent+outcome with `SO_PEERCRED` identity,
+  timeout, hard-death detectability, negative authorization). Surfaced and fixed
+  the actor-ownership bug (runix #45, rsystemd #12).
+- **A0-dev — apt-installable `.deb` stack** (`a0-packaging-plan.md`) — the runtime
+  stack builds as six `.deb`s (four R packages, the audit broker, a `runix-stack`
+  metapackage) via a debhelper orchestrator with an exact-versioned metapackage
+  closure and pinned/checksummed provenance. A required `packaging` CI gate
+  builds, installs from local files, and drives an unprivileged broker mutation;
+  proven on disposable guests (install/upgrade/remove + the A1 gates on the
+  apt-installed stack). **A0-release** — the signed public archive — is
+  intentionally deferred until Runix is good enough to deserve the ceremony.
 
 ## Open gaps (codex review 2026-08-07 + additions)
 
@@ -248,11 +262,23 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    Jansson lineage — strict parsing, a documented numeric-semantic contract,
    exact envelope goldens, and CI on the apt binary. The durable-audit file
    sink keeps its base-R encoder (intentional internal exception).
-5. **apt mutation boundary** contract pass (gaps 2 + 3 for apt together):
-   authorization + concurrency/locking + operation identity — **contract
-   written** (`apt-mutation-boundary-contract.md`), a dedicated
-   pkexec/polkit-gated helper, rapt left as-is. **← next arc.**
-6. apt mutation implementation; then gaps 4–6 incrementally.
+5. **A1 canary** — the unprivileged mutation boundary proven end-to-end on a
+   real systemd/polkit host (7 gates); surfaced + fixed the actor-ownership bug
+   (runix #45, rsystemd #12) — **done**.
+6. **A0-dev packaging** — the runtime stack apt-installable as local `.deb`s,
+   gated by a required `packaging` CI check, proven on disposable guests
+   (install/upgrade/remove + A1 gates) — **done**. **A0-release** (the signed
+   public archive) is **deferred**.
+7. **apt mutation boundary** — the next arc. A *second pass* on the contract
+   (`apt-mutation-boundary-contract.md`) before code: authorization vs approval
+   (distinct axes), transaction identity, dpkg locking, recovery from
+   interrupted transactions, and package ownership. pkgstate stays **read-only**;
+   mutations live in a separate sibling/helper (provisionally `pkgops`), rapt
+   left as the narrow r2u backend. Verification ladder: contract → helper/API →
+   fixture tests → a minimal destructive **disposable-VM** gate (dpkg locking,
+   maintainer scripts, interrupted transactions, conffiles, and partial states
+   cannot be faked in fixtures). **← next arc.**
+8. apt mutation implementation; then gaps 4–6 incrementally.
 
 ## Validation: the workflow that must be materially better
 
