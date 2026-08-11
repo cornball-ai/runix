@@ -36,13 +36,16 @@ implementable against the **shipped** audit broker (`runix-audit-broker`
 5. **Scope tightened.** `apt.configure` and hold/unhold gain risk metadata,
    repository/key mutation is deferred to its own hardened contract, and package
    ownership uses rapt's exact predicate across the whole computed transaction.
-6. **The privileged boundary is not bypassable.** Authorization is enforced
-   **per verb** in polkit (separate action IDs by risk class, not one umbrella),
-   and the helper **independently** recomputes and policy-checks every
-   transaction (ownership/holds/protected/options) instead of trusting the
-   unprivileged preview — over a narrow, non-evaluating protocol, with apt's own
-   `DPkg::Lock::Timeout` lock. Preview is honest per operation (a real simulate
-   only for package transactions).
+6. **The privileged boundary is not bypassable** (security review). Authorization
+   is bound to **distinct immutable entrypoint paths** — `pkexec` selects the
+   action by exec-path, not `argv` — one per risk class. The helper enforces the
+   whole policy on the plan it commits, made **atomic under one libapt context**
+   so the validated plan is the executed plan (no simulate-then-execute TOCTOU;
+   this pulls libapt into v1). "No effect without durable intent" is enforced by a
+   **broker-issued single-use receipt** the helper redeems (a broker capability;
+   API-level convention until it ships). The machine path registers no polkit
+   agent, so an auth challenge is a typed refusal, never a prompt. Preview is
+   honest per operation.
 
 ## Scope and boundary
 
@@ -59,11 +62,14 @@ implementable against the **shipped** audit broker (`runix-audit-broker`
   wrapped by this contract. The general-apt path defined here is separate
   from rapt. Any future unification (the `bsrm` discussion) is a separate
   decision with Dirk and is explicitly not assumed here.
-- **Out of scope, backend swap:** whether the effect is issued via the
-  `apt-get`/`dpkg` CLI bridge or a native libapt binding (RcppAPT) is the
-  Phase-4 backend question. This contract fixes the *boundary* (authz, lock,
-  identity, audit); the CLI bridge is the initial backend under the usual
-  discipline (`LC_ALL=C`, verify postconditions, injectable runner).
+- **Backend, revised:** the effect backend is no longer a purely Phase-4 choice.
+  Whole-transaction enforcement must be **atomic under one lock** (see the helper
+  boundary), which the `apt-get -s`-then-`apt-get` CLI bridge cannot provide
+  (simulate is unlocked). v1 therefore requires a **single libapt context**
+  (`libapt-pkg`/RcppAPT) for gated mutations; the CLI bridge, under the usual
+  discipline (`LC_ALL=C`, postcondition verification, injectable runner), is
+  acceptable only for operations that need no whole-transaction atomic
+  enforcement (e.g. `apt.update`).
 
 ## Risk and authorization metadata per operation
 
@@ -149,36 +155,71 @@ at the prompt. Options considered:
 **Recommendation:** option 2 for v1, with a strict split of duties and
 **verb-level** authorization enforced on the privileged side.
 
-*Authorization is per risk class, in polkit, not in R.* A single umbrella action
-would collapse the boundary: if `apt.update` can be authorized non-interactively
-under it, the same action authorizes `install`/`remove` for anyone who invokes
-the helper directly. So each risk class gets its **own polkit action and
-entrypoint** — e.g. `ai.cornball.runix.apt.update` (policy may allow it
-non-interactively), `ai.cornball.runix.apt.install`, `...apt.remove`
-(`auth_admin`), `...apt.configure`, `...apt.hold`/`...apt.unhold` — and the
-helper checks the action for the exact verb it was asked to perform.
-`approval_required` is thus a real gate at the privileged boundary, not a flag in
-bypassable R code: a caller who skips the R layer and invokes the helper directly
-still meets the correct per-verb polkit check.
+*Authorization is per risk class, bound to distinct entrypoint paths.* `pkexec`
+selects a polkit action by the **executable-path** annotation on the action, not
+by the program's arguments — it does not validate `argv`. So the verb cannot be
+an argument the helper merely "checks": each risk class is a **distinct, immutable
+helper entrypoint path**, and each path is bound to its own polkit action
+(`ai.cornball.runix.apt.update`, `...apt.install`, `...apt.remove` [`auth_admin`],
+`...apt.configure`, `...apt.hold`/`...apt.unhold`). The verb is fixed by *which
+binary path* was invoked; the code reachable from the `update` entrypoint cannot
+reach install/remove. Never rely on `command_line` or a caller-controlled
+`argv[0]`. A caller who skips the R layer still lands on one specific path and its
+one specific action — an umbrella action, or verb-by-argument, would collapse the
+boundary.
 
-*The helper enforces the whole policy independently; it never trusts the caller's
-preview.* Before acting, the native helper **recomputes the full apt
+*The machine path never prompts.* `pkexec` can register an authentication agent
+and challenge interactively; a `--json` invocation must not. The machine path
+registers **no** polkit agent, so an action that requires authentication returns
+a typed refusal (`runix_approval_required` for a would-be human gate,
+`runix_unauthorized` for a denial) immediately and with **no UI** — never a
+blocked prompt.
+
+*The helper enforces the whole policy independently, and the plan it enforces is
+the plan it commits.* Before acting, the native helper **recomputes the full
 transaction** and enforces, on the trusted side, rapt ownership over the whole
-computed set, holds, protected/essential packages, and the allowed option set.
-The unprivileged preview is advisory only. The protocol is narrow and
-non-evaluating: an enumerated verb plus validated, typed arguments (package names
-matched to a strict pattern), a **sanitized environment**, **no shell or R
-evaluation**, and **no pass-through apt flags or config paths** — the helper
-chooses apt's options; the caller cannot inject `-o`/`-c`/`--force*`.
+computed set, holds, protected/essential packages, and the allowed option set —
+the unprivileged preview is advisory only. Critically, **enforcement and
+execution must be atomic under one lock/context**: `apt-get -s` simulates
+*without* the lock, so a plan validated by simulation and then applied by a
+separate `apt-get` run is a TOCTOU hole — another contender
+(`unattended-upgrades`, a human) can change state in between, and the committed
+transaction is then not the one that passed policy. v1's whole-transaction
+guarantee therefore requires a **single libapt context** that takes the lock
+once, resolves the plan, lets the helper enforce policy on *that resolved plan*,
+and commits it — all under the one held lock. This pulls **libapt
+(`libapt-pkg`/RcppAPT) into the v1 boundary**, ahead of its former Phase-4 slot:
+the `apt-get` CLI bridge cannot provide atomic whole-transaction enforcement, and
+whole-transaction ownership/protection is a v1 requirement. The protocol is narrow
+and non-evaluating: an enumerated verb (fixed by the entrypoint path) plus
+validated, typed arguments (package names matched to a strict pattern), a
+**sanitized environment**, **no shell or R evaluation**, and **no pass-through apt
+flags or config paths**.
+
+*No effect without a durable intent — enforced, not conventional.* The helper
+must not act on trust that the caller "opened an intent"; a caller holding the
+verb's authorization could otherwise `pkexec` the entrypoint directly and mutate
+with no durable record. So opening the intent returns a **broker-issued receipt**
+— operation-bound (verb, resource, plan hash, actor, nonce), single-use, short
+TTL — that the caller passes to the helper, and the helper **redeems it with the
+broker before committing**. A missing, reused, expired, or mismatched receipt is
+a fail-closed refusal (`runix_no_intent`). This makes "no effect without durable
+intent" a guarantee of the privileged boundary, not an R-layer convention. It
+needs a **broker capability extension**: today's broker only appends records, so
+issuing and redeeming receipts is new broker work (alongside the schema extension
+below), named here as a prerequisite. Until it ships, the guarantee is
+**API-level only** — the R layer always opens the intent first, but a direct
+`pkexec` of an entrypoint is not structurally prevented — and this contract says
+so plainly rather than claiming a boundary it does not yet enforce.
 
 *The helper does only the effect; the unprivileged caller owns the audit.* The
 caller opens the durable intent through the broker (audit actor = the real caller
 via `SO_PEERCRED`, never root), invokes the helper, verifies post-state via
 `pkgstate`, and closes the outcome on the same broker interaction — a privileged
 helper that audited itself would record root or be unable to close the caller's
-process-bound receipt. The lock is **apt's own**: the helper runs apt with
-`-o DPkg::Lock::Timeout=<n>` and lets apt acquire the dpkg frontend lock; it does
-not pre-acquire that lock itself (which would deadlock against apt). Denial at the
+process-bound receipt. The lock is held **once by the atomic context** across
+resolve-enforce-commit, with a bounded wait (see Global lock and concurrency); no
+simulate-then-execute means no window in which the lock is dropped. Denial at the
 polkit gate raises `runix_unauthorized`; no new resident daemon.
 
 The authorization *descriptor* recorded in the audit (`authorized_via`) names the
@@ -261,6 +302,12 @@ cross-record link through today's broker.
   fixtures (the new fields validate; a record without them still validates; older
   clients are unaffected). Those features are gated on this extension landing and
   being re-pinned, exactly as the R stack re-pins `janssonr` after a change.
+- **The intent receipt is a broker *capability*, not just a field.** Making "no
+  effect without durable intent" a boundary guarantee (above) needs the broker to
+  **issue** an operation-bound, single-use, short-TTL receipt when the intent is
+  opened and to **verify/redeem** it for the privileged helper — new behaviour,
+  not just a new record key. It is specified here as a prerequisite for the hard
+  guarantee; v1 without it holds the guarantee only by R-layer convention.
 
 ## Global lock and concurrency
 
@@ -427,6 +474,10 @@ while dpkg may be part-applied. Detectable, not self-healing:
 ## Typed errors and retryability
 
 - `runix_unauthorized` — polkit/pkexec denied (terminal).
+- `runix_no_intent` — the helper was invoked without a valid broker-issued intent
+  receipt (missing, reused, expired, or mismatched); fail-closed. Enforceable once
+  the broker gains the receipt capability (see "Broker schema dependency"); until
+  then "no effect without durable intent" is an API-level convention.
 - `runix_apt_locked` — lock not acquired within the timeout (**retryable**).
 - `runix_operation_failed` — apt/dpkg returned nonzero for a definite
   failure (terminal; carries the tool's diagnostic).
@@ -455,9 +506,9 @@ caller** (not the helper):
   invoking the helper — so before any lock is taken or effect issued. If it
   cannot persist, abort before touching the system. The actor is the caller's
   kernel identity (`SO_PEERCRED`), never root.
-- **Effect** is the helper's only job — it recomputes and policy-checks the
-  transaction, then runs apt with `-o DPkg::Lock::Timeout` so *apt* acquires the
-  frontend lock and issues it; the helper writes no audit.
+- **Effect** is the helper's only job — under one libapt context it takes the
+  lock, recomputes and policy-checks the transaction, and commits it atomically;
+  it redeems the intent receipt first and writes no audit.
 - **Outcome** closed by the caller on the same broker interaction, with the real
   `effect_issued`, the `observed` post-state read back from `pkgstate`,
   `outcome`, `elapsed`, and the same `correlation_id`. `audit_persisted` is
@@ -543,6 +594,22 @@ Helper-boundary conformance (against the native helper, not just the R fixture):
 17. Predicate drift: a cross-repo test asserts the pinned ownership predicate is
     byte-for-byte the pattern rapt applies in `rapt` `r-pkg/R/manager.R`; drift
     fails the test rather than silently diverging.
+18. Plan ≠ execution is refused: with package state changed between resolve and
+    commit, the atomic libapt context fails closed — it never commits a
+    transaction other than the one policy enforced. (A simulate-then-execute
+    backend that would commit the changed plan fails this test, which is the
+    point.)
+19. No intent, no effect: invoking a helper entrypoint directly without a valid
+    broker-issued receipt is refused `runix_no_intent` and issues no effect
+    (asserts the boundary guarantee once the receipt capability exists; until
+    then the test is marked pending on that broker work).
+20. Entrypoint isolation: the `apt.update` entrypoint/action cannot reach
+    install/remove code — mutating packages requires the install/remove entrypoint
+    and its `auth_admin` action; a caller holding only the update action cannot
+    install or remove.
+21. Noninteractive machine path: a `--json` invocation of an auth-required verb
+    returns a typed refusal (`runix_approval_required` / `runix_unauthorized`)
+    with no polkit agent registered and no prompt — never a blocked challenge.
 
 ## Verification ladder
 
