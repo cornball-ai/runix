@@ -15,6 +15,19 @@ lines <- readLines(sp, warn = FALSE)
 expect_equal(length(lines), 2L)
 expect_true(all(grepl("^\\{.*\\}$", lines)))
 
+## actor is sink-stamped framing on the FRAMED audit path (emit / two-phase),
+## not the bare write() primitive: the sink adds a normalized "uid:N" the
+## caller's record never carried (durable-audit-contract.md). This is what lets
+## a subsystem hand the SAME record to the broker, which derives actor from
+## SO_PEERCRED and rejects a client-supplied one.
+ep <- file.path(td, "framed.jsonl")
+se <- file_audit_sink(ep, durability = "none")
+expect_true(se$emit(list(operation = "demo", outcome = "preview"),
+                    "preview")$persisted)
+fr <- janssonr::from_json(readLines(ep, warn = FALSE)[1L])
+expect_true(grepl("^uid:", fr$actor))
+expect_identical(fr$operation, "demo")
+
 ## file perms restrictive: not world-readable, not world-writable (0640)
 m <- as.integer(file.info(sp)$mode)
 expect_equal(bitwAnd(m, 2L), 0L)
@@ -78,6 +91,10 @@ expect_true(length(c(rp2, Sys.glob(paste0(rp2, ".*")))) <= 3L)
 ms <- memory_audit_sink()
 expect_true(ms$write(list(a = 1))$persisted)
 expect_equal(length(ms$records()), 1L)
+## memory sink stamps the normalized actor framing on the emit/two-phase path
+me <- memory_audit_sink()
+me$emit(list(operation = "x", outcome = "preview"), "preview")
+expect_true(grepl("^uid:", me$records()[[1L]]$actor))
 mf <- memory_audit_sink(fail_on = function(r) identical(r$phase, "outcome"))
 expect_false(mf$write(list(phase = "outcome"))$persisted)
 

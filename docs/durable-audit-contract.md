@@ -155,6 +155,20 @@ canonical value (name resolution is unstable and sink-dependent). This
 supersedes the earlier `name(uid)` form — a pre-release normalization so all
 sinks (local file, memory, broker) emit the identical actor representation.
 
+`actor` is **authority-derived framing metadata, not subsystem domain
+content** — it belongs with `host`, `pid`, and `time`, and is stamped by the
+sink layer, never supplied by the subsystem building the record. A local
+file/memory sink derives it from the writing process via the shared core helper
+(`audit_actor()`); the broker derives it from the peer's kernel-verified
+credentials (`SO_PEERCRED`) and **rejects** a client-supplied `actor` (or any
+other reserved identity/framing field) as `schema_invalid`
+(`audit-broker-contract.md`). A subsystem may keep `actor` on its in-memory
+result for the caller to read, but must obtain it from the shared helper and
+must not place it in the record it hands a sink. The broker client adapter
+enforces this symmetrically: it refuses to send a record carrying a reserved
+key rather than stripping it, so a producer that leaks framing into domain
+content fails closed at the seam.
+
 ## Sink-extension records (the `broker` object, `broker_checkpoint`, `broker_rate`)
 
 A sink that maintains durable state of its own (the audit broker,

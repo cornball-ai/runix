@@ -116,6 +116,25 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 .broker_is_true <- function(x) is.logical(x) && length(x) == 1L && isTRUE(x)
 .broker_is_bool <- function(x) is.logical(x) && length(x) == 1L && !is.na(x)
 
+## Reserved identity/framing keys a sink owns; a subsystem must never put them in
+## a record's domain content. The broker derives actor/host/pid/time from the
+## authenticated peer and mints correlation_id/binding itself, and rejects a
+## client-supplied one as schema_invalid (audit-broker-contract.md). The adapter
+## rejects them here too -- locally, before a byte reaches the wire, and named --
+## so a producer that leaks framing into domain content fails closed loudly at
+## the seam rather than being silently stripped (which would hide the same bug
+## the next subsystem repeats).
+.BROKER_RESERVED_KEYS <- c("schema_version", "record_type", "correlation_id",
+                           "phase", "host", "pid", "actor", "time", "binding",
+                           "broker")
+
+.broker_reserved_in <- function(record) {
+    if (!is.list(record) || is.null(names(record))) {
+        return(character(0))
+    }
+    intersect(names(record), .BROKER_RESERVED_KEYS)
+}
+
 ## Parse + strictly validate a response body (raw or character). Returns
 ## list(kind = <shape>|"invalid", fields = <parsed>, reason = <chr>).
 .broker_parse_response <- function(body) {
@@ -249,6 +268,9 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     }
 
     open_intent <- function(record) {
+        if (length(.broker_reserved_in(record))) {
+            return(fail_receipt("runix_broker_reserved_field"))
+        }
         v <- call(list(type = "open_intent", record = record))
         if (!identical(v$kind, "open_ok")) {
             return(fail_receipt(.broker_err_code(v)))
@@ -262,6 +284,10 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     }
 
     write_outcome <- function(receipt, record) {
+        if (length(.broker_reserved_in(record))) {
+            return(list(persisted = FALSE,
+                        error = "runix_broker_reserved_field"))
+        }
         bind <- receipt$binding
         if (is.null(bind) || length(bind) != 1L || is.na(bind) ||
             !nzchar(bind)) {
@@ -281,6 +307,9 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         if (!(is.character(phase) && length(phase) == 1L &&
                 phase %in% c("preview", "noop"))) {
             return(fail_receipt("runix_broker_bad_phase"))
+        }
+        if (length(.broker_reserved_in(record))) {
+            return(fail_receipt("runix_broker_reserved_field"))
         }
         v <- call(list(type = "emit", phase = phase, record = record))
         if (!identical(v$kind, "emit_ok")) {
