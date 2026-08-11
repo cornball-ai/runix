@@ -98,8 +98,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
                        outcome_ok = c("ok", "persisted"),
                        emit_ok = c("audit_scope", "correlation_id", "ok", "persisted"),
                        open_ok = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
-                       capabilities_ok = c("extensions", "frame_version", "ok",
-                                           "plan_schemas", "record_schema_version"),
+                       capabilities_ok = c("extensions", "frame_version", "ok", "plan_schemas",
+        "record_schema_version"),
                        error = c("error", "message", "ok"))
 
 ## The broker's closed error-code set (PROTOCOL.md). Anything else in an error
@@ -121,7 +121,7 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 ## returns whole JSON numbers as R integers; tolerate a whole double too.
 .broker_is_count <- function(x) {
     is.numeric(x) && length(x) == 1L && !is.na(x) && is.finite(x) &&
-        x >= 1 && x == round(x)
+    x >= 1 && x == round(x)
 }
 ## a JSON object: janssonr gives a named list, and even an empty object carries
 ## character(0) names (non-NULL). A JSON array gives NULL names, so names()
@@ -131,7 +131,7 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 ## and every element is a scalar count. An empty array is valid (vacuously).
 .broker_is_int_array <- function(x) {
     is.list(x) && is.null(names(x)) &&
-        all(vapply(x, .broker_is_count, logical(1)))
+    all(vapply(x, .broker_is_count, logical(1)))
 }
 
 ## Validate a capabilities response body (already top-level shape-matched).
