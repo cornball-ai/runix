@@ -33,11 +33,15 @@ do not faithfully reproduce any of those, so A1 runs in a disposable KVM guest.
 
 ## Cleanup boundary
 
-The guest is disposable. Teardown removes the domain and all its storage and
-leaves nothing on the host but the `~/canary` working dir (base image, keypair,
-scripts):
+The guest is disposable. Teardown removes only the **owned** domain and its
+storage and leaves nothing on the host but the `$HOME/canary` working dir (base
+image, keypair, scripts). It is deliberately narrow: the domain carries an
+ownership marker in its description (stamped at create), and `destroy` refuses
+an empty/ambiguous name, refuses a same-named domain that lacks the marker,
+never removes the shared NAT network or any other domain, and asserts the domain
+and its volumes are actually gone afterward:
 
-    deploy/canary/provision.sh destroy   # virsh destroy + undefine --remove-all-storage
+    deploy/canary/provision.sh destroy   # owned domain + its storage only
 
 Re-running `provision.sh` (no arg) tears down and rebuilds from the verified
 base — cheaper and more honest than keeping a mutated guest around as a snapshot

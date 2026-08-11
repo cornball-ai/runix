@@ -1,13 +1,15 @@
 #!/bin/bash
-# Provision the disposable A1 canary guest on troy-g5. Run ON g5 as troy.
+# Provision the disposable A1 canary guest on any KVM host. Run ON the host as
+# the invoking (libvirt-group) user.
 #
-# Rootless: qemu:///system via troy's libvirt-group membership, disks streamed
-# into the default pool with vol-upload (no direct write to /var/lib/libvirt),
-# NAT networking, cloud-init seeds the canary ssh key. The host is untouched
-# beyond the pool volumes and ~/canary; teardown removes both.
+# Rootless: qemu:///system via libvirt-group membership, disks streamed into the
+# default pool with vol-upload (no direct write to /var/lib/libvirt), NAT
+# networking, cloud-init seeds the canary ssh key. The host is untouched beyond
+# the guest's own domain + storage and $HOME/canary; teardown removes only
+# those, never a shared network or another domain.
 #
 #   deploy/canary/provision.sh          # provision (idempotent: recreates)
-#   deploy/canary/provision.sh destroy  # tear the guest down, remove storage
+#   deploy/canary/provision.sh destroy  # tear the OWNED guest down + its storage
 set -euo pipefail
 
 NAME=runix-canary-a1
@@ -18,14 +20,46 @@ DISK_GB=20
 RAM_MB=4096
 VCPUS=2
 C="virsh -c qemu:///system"
+# Explicit ownership marker stamped into the domain's description at create and
+# verified before any destructive action. A domain of our name that lacks it is
+# NOT ours and is refused -- teardown never guesses.
+MARKER="runix-canary owned by deploy/canary/provision.sh"
 
+# Destroy ONLY the domain we own: refuse an empty/ambiguous name, refuse a
+# same-named domain that lacks our marker, touch no shared resource (the NAT
+# network is never removed), and assert the domain + storage are gone after.
 teardown() {
-    echo "== teardown =="
-    $C destroy "$NAME" 2>/dev/null || true
-    $C undefine "$NAME" --remove-all-storage 2>/dev/null || true
+    echo "== teardown (owned domain '$NAME' only) =="
+    case "$NAME" in
+        "" | *[!a-zA-Z0-9._-]*)
+            echo "refusing: '$NAME' is empty or not a plain domain name" >&2
+            exit 2 ;;
+    esac
+    if $C dominfo "$NAME" >/dev/null 2>&1; then
+        desc=$($C desc "$NAME" 2>/dev/null || true)
+        case "$desc" in
+            *"$MARKER"*) : ;;
+            *)
+                echo "refusing: domain '$NAME' exists but lacks our ownership" \
+                     "marker; it is not ours to remove" >&2
+                exit 3 ;;
+        esac
+        $C destroy "$NAME" 2>/dev/null || true
+        $C undefine "$NAME" --remove-all-storage 2>/dev/null || true
+    fi
     $C vol-delete --pool "$POOL" "${NAME}.qcow2" 2>/dev/null || true
     $C vol-delete --pool "$POOL" "${NAME}-seed.iso" 2>/dev/null || true
-    echo "torn down."
+    # Assert the owned domain and its volumes are actually gone.
+    if $C dominfo "$NAME" >/dev/null 2>&1; then
+        echo "ERROR: domain '$NAME' still present after teardown" >&2; exit 4
+    fi
+    for v in "${NAME}.qcow2" "${NAME}-seed.iso"; do
+        if $C vol-info --pool "$POOL" "$v" >/dev/null 2>&1; then
+            echo "ERROR: volume '$v' still present after teardown" >&2; exit 4
+        fi
+    done
+    echo "torn down: domain and storage for '$NAME' are gone;" \
+         "shared network and other domains untouched."
 }
 
 if [ "${1:-}" = "destroy" ]; then
@@ -84,6 +118,7 @@ SEED_PATH=$($C vol-path --pool "$POOL" "${NAME}-seed.iso")
 echo "== virt-install (import) =="
 virt-install --connect qemu:///system \
     --name "$NAME" \
+    --metadata "title=$NAME,description=$MARKER" \
     --memory "$RAM_MB" --vcpus "$VCPUS" \
     --disk "path=$DISK_PATH,format=qcow2,bus=virtio" \
     --disk "path=$SEED_PATH,device=cdrom" \
