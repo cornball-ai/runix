@@ -88,6 +88,39 @@ socket-activated — mirrors runix CI).
     bash /tmp/canary/setup-canary.sh
     bash /tmp/canary/gates.sh                   # runs the 7 gates as `canary`
 
-## Results
+## Results (2026-08-11, guest runix-canary-a1)
 
-_Filled in after the gate run — see the "A1 results" section appended below._
+**All 7 gates pass** on a real Noble guest with host systemd/polkit and the
+socket-activated broker, driven by the unprivileged `canary` (uid 1001):
+
+| gate | result | evidence |
+|---|---|---|
+| 1 broker-backed system durability | PASS | `system_durable_audit=true`, `audit_scope=system` for uid 1001 |
+| 2 preview no-effect | PASS | InvocationID unchanged across `--preview` |
+| 3 restart + InvocationID | PASS | `method=invocation_id`, id advances, `actor=uid:1001` |
+| 4 durable intent+outcome | PASS | one `correlation_id`, `actor=uid:1001`, `broker.peer.uid=1001` |
+| 5 timeout audited | PASS | `runix_timeout`, `observed.active_state=activating`, timeout outcome recorded |
+| 6 hard death | PASS | SIGKILL mid-op; open intent still present after a broker restart (detectability, not recovery) |
+| 7 unrelated unit denied | PASS | `runix_unauthorized`, exit 1 |
+
+### Findings the canary surfaced
+
+1. **R version floor (deployment).** The `r-cornball-janssonr` apt binary needs
+   `r-base-core >= 4.6.0`; stock Ubuntu Noble ships 4.3.3. The fleet must get R
+   from the CRAN/r2u apt repo, not the distro. A0 packaging must encode this.
+2. **`actor` ownership bug (fixed).** rsystemd put `actor` in the audit record;
+   the broker owns `actor` (`SO_PEERCRED`) and rejected it `schema_invalid`, so
+   every unprivileged system-scope mutation fail-closed refused. Fixed: runix
+   #45 (`actor` is sink-derived framing; broker adapter rejects reserved keys)
+   and rsystemd #12 (builders omit `actor`; use `runix::audit_actor()`). The
+   rsystemd→broker path had no end-to-end test — CI only exercised the direct
+   client.
+3. **rsystemd has no CI workflow.** Part of why (2) slipped through. A
+   production-path integration test (unprivileged mutation → real broker →
+   durable records) belongs in CI; this runbook's gate suite is its manual form.
+
+### Reproduce / teardown
+
+`gates.sh` re-runs all seven as `canary`. The guest is disposable:
+`provision.sh destroy` removes the domain and all storage; nothing remains on
+the host but `~/canary`.
