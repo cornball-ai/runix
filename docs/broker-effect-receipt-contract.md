@@ -152,7 +152,12 @@ pinned — not left to "hash the plan":
   `plan_schema` then the verb (`"1" 0x1e "apt.install" 0x1e` then the records).
   All values are UTF-8, exact (never locale-formatted); a missing version is the
   empty string; an empty descriptor is the prefix followed by nothing.
-  `plan_hash` is the lowercase hex SHA-256 of these bytes.
+  `plan_hash` is the lowercase hex SHA-256 of these bytes. **Delimiter safety:**
+  no field value may contain a separator (US `0x1f`, RS `0x1e`) or a sub-list
+  delimiter (`,`, `=`); a value that does — which valid apt package names,
+  versions, architectures, and source fields never do — makes the descriptor
+  uncanonicalisable and is a **fail-closed refusal**, never silently truncated or
+  escaped.
 - **Fields per verb** (record shape):
   - install/remove/purge/upgrade/dist_upgrade — over the **whole resolved
     transaction** (target and every pulled dependency):
@@ -162,12 +167,17 @@ pinned — not left to "hash the plan":
     removal), and `flags` is a bytewise-sorted comma list from the fixed enum
     `{hold, auto, essential, protected}`.
   - `apt.configure`: `package │ architecture │ current_version │ state`, `state`
-    from the fixed dpkg status enum (`unpacked`, `half-configured`, …).
+    from the exact dpkg status enum `{half-installed, unpacked, half-configured,
+    triggers-awaited, triggers-pending}` (the states `dpkg --configure -a` acts
+    on); any other status is not a configure target.
   - `apt.hold`/`apt.unhold`: `package │ from_state │ to_state`, `state ∈
-    {hold, install}` (dpkg selection states).
+    {hold, install}` (the exact dpkg selection states).
   - `apt.update`: `uri │ suite │ components │ options` — no package fields;
-    `components` is a bytewise-sorted comma list and `options` a bytewise-sorted
-    `k=v` comma list of the source's apt options (`signed-by`, `arch`, …).
+    `components` is a bytewise-sorted comma list, and `options` is a
+    bytewise-sorted `k=v` comma list over the **fixed key set**
+    `{signed-by, architectures, trusted}` (the identity-relevant deb822 source
+    fields); keys outside the set are excluded from the digest, and values obey
+    the delimiter rule above.
 - **Golden vectors** for each verb (including empty and single-record cases) are
   part of the shared fixture corpus, so R and the C helper are proven to produce
   identical bytes and the same digest — the encoding is pinned by test, not prose.
@@ -236,16 +246,32 @@ redeemed and expired are terminal. There is no un-redeem.
   **boot-id change** every outstanding receipt is invalid regardless of clock
   (boot time resets across a reboot), so a redeem whose boot id differs from the
   broker's current boot id is refused (`receipt_expired`).
-- **Rotation carry-forward.** Issued, unexpired receipts are re-materialised into
-  the fresh segment on rotation, alongside the open-intent checkpoints, so the
-  current segment stays the authoritative superset.
+- **Rotation carry-forward.** For **every still-open intent** (no outcome yet),
+  its receipt state is re-materialised into the fresh segment on rotation,
+  alongside the open-intent checkpoint — **including a redeemed receipt's
+  `redeemed` state**, not only issued/unexpired ones. Dropping the redeemed state
+  would make a post-rotation restart forget the redemption and then wrongly reject
+  the legitimate `effect_issued: true` outcome (and lose replay protection). Once
+  an intent is closed (its outcome written), its receipt no longer needs carrying.
 - **Daemon-restart recovery.** Reconstruction reads the current segment and
-  rebuilds receipt state with the same strict, fail-closed validation as records;
-  a redeemed receipt stays redeemed (replay-proof across a restart), an issued one
-  stays redeemable only while its boot id still matches.
+  rebuilds receipt state with the same strict, fail-closed validation as records:
+  a redeemed receipt stays redeemed (replay-proof, and its still-open intent's
+  `effect_issued: true` outcome is still accepted), an issued one stays redeemable
+  only while its boot id still matches.
 - **Host reboot.** After a reboot the boot id differs, so no pre-reboot receipt is
   redeemable; their intents are open, un-redeemed, and reconcilable. A receipt can
   never straddle a reboot.
+
+**On-disk representation.** Receipt state is durable broker state, not record
+content, and has its **own on-disk state schema version** (distinct from the wire
+capability version). Each receipt is persisted as a broker-internal record
+carrying: `correlation_id`; `state` (`issued`|`redeemed`); the SHA-256
+**verifier** (never the token); the bound `{actor_uid, verb, resource,
+plan_schema, plan_hash}`; the issue `CLOCK_BOOTTIME` and TTL; and `boot_id`. On
+rotation it is written as a `broker_receipt` checkpoint for every still-open
+intent (mirroring `broker_checkpoint`/`broker_rate`) and parsed on reconstruction
+with the same strict, fail-closed validation. The on-disk state schema version
+gates reconstruction and changes independently of the wire capability version.
 
 **Effect outcomes require a redemption — only when the intent opted in.** An
 intent opened with `effect_required: true` (the receipt path) refuses a
@@ -295,7 +321,8 @@ set, so each is a two-sided contract change):
 | `receipt_actor_mismatch` | `principal_uid` differs from the bound original actor |
 | `effect_without_receipt` | a `write_outcome` with `effect_issued: true` whose receipt was never redeemed |
 
-`unknown_request` still covers a type that is not one of the now-four verbs. The
+`unknown_request` still covers a type that is not one of the now-five verbs
+(`open_intent`, `write_outcome`, `emit`, `redeem_receipt`, `capabilities`). The
 `effect` object is bounded and typed like any other input; `plan_hash` is a
 fixed-width hex string.
 
@@ -327,24 +354,28 @@ which plan-digest schemas it accepts before opening an intent:
 
 ## Versioning
 
-Three independent version axes, surfaced by `capabilities` above; this change
-touches only some, and existing clients stay compatible:
+**Four** independent version axes, plus the negotiated plan-digest encoding; this
+change touches only some, and existing clients stay compatible:
 
 - **Frame-protocol version** (the 1-byte frame `version`, `PROTOCOL.md`):
   **unchanged** — framing is identical.
 - **Public audit-record schema** (`schema_version` in records, `RECORD_SCHEMA`):
   **unchanged.** Effect-receipt data is request/response and broker state, not
-  record content, so `RECORD_SCHEMA`'s fixed allowlist is untouched and a client
-  using the exact record schema is byte-for-byte unaffected. `schema_version`
-  bumps only if a *record field* is added, which this capability does not need.
-- **Private broker-extension version** (new): the effect-receipt capability — the
-  `effect` request member, the `effect_receipt` response member, the
-  `redeem_receipt` verb, and the new error codes — is advertised under a broker
-  extension/capability version, so a client can learn whether receipts are
-  supported. A broker without it never issues receipts; a client that sends no
-  `effect` gets exactly today's behaviour.
-- **Plan-digest schema version** (above): independent of all of these; issue and
-  redeem must agree on it.
+  record content, so the fixed allowlist is untouched and an exact-schema record
+  client is byte-for-byte unaffected. It bumps only if a *record field* is added,
+  which this capability does not need.
+- **Wire broker-extension (capability) version** (new): the effect-receipt
+  feature on the wire — the `effect` request member, the `effect_receipt`
+  response member, the `redeem_receipt` and `capabilities` verbs, the new error
+  codes — advertised as `extensions.effect_receipt` in `capabilities`.
+- **On-disk broker-state schema version** (new, **distinct from the wire
+  version**): the durable receipt/checkpoint representation (`broker_receipt`
+  above) that reconstruction reads. The wire feature and the on-disk format evolve
+  independently, so they version separately.
+
+The **plan-digest schema** (`plan_schema`) is a negotiated encoding version, not a
+protocol/state axis: offered in `capabilities.plan_schemas`, chosen by the client,
+and bound into the receipt.
 
 Net: today's `open_intent`/`write_outcome`/`emit` callers and exact-schema record
 readers are unaffected; the capability is purely additive and negotiated.
@@ -384,9 +415,9 @@ existing frames do.
 12. Token non-disclosure: the live receipt token never appears in `argv`, the
     environment, or any exported/forwarded record; durable state holds only the
     verifier hash, and a state reader cannot reconstruct a redeemable token.
-13. Effect outcome without redemption: a `write_outcome` with
-    `effect_issued: true` whose intent's receipt was never redeemed is refused
-    `effect_without_receipt`.
+13. Effect outcome without redemption: for an intent opened with
+    `effect_required: true`, a `write_outcome` with `effect_issued: true` whose
+    receipt was never redeemed is refused `effect_without_receipt`.
 14. Disconnect after fsync: the broker fsyncs the redemption, then the connection
     drops before the reply; the receipt is spent (a retry gets `receipt_redeemed`)
     and a helper that never saw `redeem_ok` does not commit — at-most-once,
