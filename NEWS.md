@@ -1,3 +1,16 @@
+# runix 0.0.1.9
+
+- The audit-broker client adapter now recognizes the broker's `capabilities`
+  discovery response: `.broker_parse_response` classifies it as
+  `capabilities_ok`. It is validated as a forward-extensible shape — scalar
+  integer `frame_version`/`record_schema_version`, an integer `plan_schemas`
+  array, and an `extensions` object whose known `effect_receipt` version is
+  checked while unknown extension names are ignored, so future broker
+  capabilities never break an older client. Both today's empty response and a
+  populated `effect_receipt`/`plan_schemas` response validate. The shared
+  broker-frame fixture corpus gains the `capabilities_ok` golden, byte-identical
+  to the broker's response builder.
+
 # runix 0.0.1.8
 
 - `actor` is now treated as authority-derived framing metadata (like `host`,

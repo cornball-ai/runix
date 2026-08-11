@@ -41,6 +41,53 @@ for (i in seq_len(nrow(bodies))) {
     }
 }
 
+## ---- capabilities: forward-extensible discovery response -----------------
+## The shared golden above covers today's empty response; these pin classifier
+## behaviour on the future populated shape and on malformed inputs.
+## a populated response (effect_receipt + a plan schema) still classifies:
+expect_equal(parse_resp(paste0(
+    '{"extensions":{"effect_receipt":1},"frame_version":1,"ok":true,',
+    '"plan_schemas":[1],"record_schema_version":1}'))$kind, "capabilities_ok")
+## an unknown extension name is ignored, not rejected (forward-extensible):
+expect_equal(parse_resp(paste0(
+    '{"extensions":{"effect_receipt":1,"future_thing":2},"frame_version":1,',
+    '"ok":true,"plan_schemas":[1],"record_schema_version":1}'))$kind,
+    "capabilities_ok")
+## malformed capabilities are rejected, never a silent accept:
+expect_equal(parse_resp(paste0(  # frame_version not an integer
+    '{"extensions":{},"frame_version":"1","ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # plan_schemas element not an integer
+    '{"extensions":{},"frame_version":1,"ok":true,',
+    '"plan_schemas":["1"],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # extensions is an array, not an object
+    '{"extensions":[],"frame_version":1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # a known extension with a non-integer version
+    '{"extensions":{"effect_receipt":"1"},"frame_version":1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+## JSON reals are not integers: the protocol requires actual JSON integers,
+## matching Jansson's json_is_integer() (janssonr keeps 1.0 a double, 1 an int).
+expect_equal(parse_resp(paste0(  # frame_version is a JSON real
+    '{"extensions":{},"frame_version":1.0,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # record_schema_version is a JSON real
+    '{"extensions":{},"frame_version":1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1.0}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # a plan schema is a JSON real
+    '{"extensions":{},"frame_version":1,"ok":true,',
+    '"plan_schemas":[1.0],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # effect_receipt is a JSON real
+    '{"extensions":{"effect_receipt":1.0},"frame_version":1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+## versions are 1-based: zero and negatives are rejected.
+expect_equal(parse_resp(paste0(  # zero version
+    '{"extensions":{},"frame_version":0,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # negative version
+    '{"extensions":{},"frame_version":-1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+
 ## ---- fail-closed with no broker (unavailable), never throws -------------
 ## Works on every platform: a missing socket is ST_UNAVAILABLE on Linux and
 ## ST_UNSUPPORTED off it -- both map to runix_broker_unavailable. A failed
