@@ -68,7 +68,7 @@ packages would contradict the design.
 | `r-cornball-rsystemd` | all | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `r-cornball-janssonr`, `r-cornball-runix` | |
 | `r-cornball-rctl` | all | `r-base-core (>= 4.6.0)`, `r-api-4.0`, `r-cornball-janssonr`, `r-cornball-runix` | `r-cornball-pkgstate`, `r-cornball-rsystemd` |
 | `runix-audit-broker` | any | `${shlibs:Depends}` | |
-| `runix-stack` (meta) | all | `r-cornball-rctl`, `r-cornball-pkgstate`, `r-cornball-rsystemd`, `runix-audit-broker` | |
+| `runix-stack` (meta) | all | `r-cornball-runix`, `r-cornball-rctl`, `r-cornball-pkgstate`, `r-cornball-rsystemd`, `runix-audit-broker` (exact `=` versions) | |
 
 - **`runix-stack`** is the daily-driver handle: "install the system" =
   `apt install ./runix-stack*.deb` (pulls the rest); `rctl` stays independently

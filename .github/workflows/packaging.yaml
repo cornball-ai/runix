@@ -90,8 +90,15 @@ jobs:
           if dpkg-deb -f "$D"/r-cornball-rctl_*_all.deb Depends | grep -qw littler; then
             echo "rctl must not depend on littler"; exit 1
           fi
-          # metapackage: exact-versioned closure over the built stack
-          dpkg-deb -f "$D"/runix-stack_*_all.deb Depends | grep -q 'r-cornball-rctl (= '
+          # metapackage: EXACT-versioned closure over EVERY built component
+          # (including the core, r-cornball-runix), so the stack it names is the
+          # one that was tested -- nothing left for apt to resolve to a newer set.
+          meta_deps=$(dpkg-deb -f "$D"/runix-stack_*_all.deb Depends)
+          for p in r-cornball-runix r-cornball-rctl r-cornball-pkgstate \
+                   r-cornball-rsystemd runix-audit-broker; do
+            echo "$meta_deps" | grep -q "$p (= " || {
+              echo "metapackage does not exact-pin $p"; exit 1; }
+          done
           # provenance pinned (CI source trees are clean) + checksums verify
           grep -qx 'provenance: PINNED' "$D/MANIFEST"
           ( cd "$D" && sha256sum -c SHA256SUMS )

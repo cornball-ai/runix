@@ -167,17 +167,21 @@ build_meta() {      # runix-stack: EXACT-version closure over the stack just bui
     # Pre-0.1, exact (=) versions are safest: the metapackage then identifies the
     # precise stack this run built (and the canary proved), not "some newer set".
     lookup() { awk -v k="$1" '$1==k{print $2; exit}' "$work/versions"; }
+    runix_v=$(lookup r-cornball-runix)
     rctl_v=$(lookup r-cornball-rctl)
     pkgstate_v=$(lookup r-cornball-pkgstate)
     rsystemd_v=$(lookup r-cornball-rsystemd)
     broker_v=$(lookup runix-audit-broker)
-    for nv in "rctl:$rctl_v" "pkgstate:$pkgstate_v" "rsystemd:$rsystemd_v" \
-              "broker:$broker_v"; do
+    # Pin the core (runix) too: the subsystems depend on r-cornball-runix
+    # UNVERSIONED, so without this the metapackage would leave the tested core
+    # unconstrained and apt could resolve a different one.
+    for nv in "runix:$runix_v" "rctl:$rctl_v" "pkgstate:$pkgstate_v" \
+              "rsystemd:$rsystemd_v" "broker:$broker_v"; do
         [ -n "${nv#*:}" ] || {
             echo "ERROR: metapackage closure missing version for ${nv%%:*}" >&2
             exit 1; }
     done
-    RUNIX_STACK_DEPENDS="r-cornball-rctl (= $rctl_v), r-cornball-pkgstate (= $pkgstate_v), r-cornball-rsystemd (= $rsystemd_v), runix-audit-broker (= $broker_v)"
+    RUNIX_STACK_DEPENDS="r-cornball-runix (= $runix_v), r-cornball-rctl (= $rctl_v), r-cornball-pkgstate (= $pkgstate_v), r-cornball-rsystemd (= $rsystemd_v), runix-audit-broker (= $broker_v)"
     export RUNIX_STACK_DEPENDS
     btree="$work/$deb"
     mkdir -p "$btree/debian"
