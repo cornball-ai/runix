@@ -117,11 +117,12 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
 .broker_is_str <- function(x) is.character(x) && length(x) == 1L && !is.na(x)
 .broker_is_true <- function(x) is.logical(x) && length(x) == 1L && isTRUE(x)
 .broker_is_bool <- function(x) is.logical(x) && length(x) == 1L && !is.na(x)
-## a scalar version/count: one non-NA integer-valued number >= 1. janssonr
-## returns whole JSON numbers as R integers; tolerate a whole double too.
+## a scalar version: one non-NA positive R integer. janssonr preserves JSON's
+## integer/real distinction (JSON `1` -> R integer, `1.0` -> R double), mirroring
+## Jansson's C json_is_integer(); the protocol requires an actual JSON integer,
+## so a real such as 1.0 -- and zero or a negative -- is rejected, not coerced.
 .broker_is_count <- function(x) {
-    is.numeric(x) && length(x) == 1L && !is.na(x) && is.finite(x) &&
-    x >= 1 && x == round(x)
+    is.integer(x) && length(x) == 1L && !is.na(x) && x >= 1L
 }
 ## a JSON object: janssonr gives a named list, and even an empty object carries
 ## character(0) names (non-NULL). A JSON array gives NULL names, so names()

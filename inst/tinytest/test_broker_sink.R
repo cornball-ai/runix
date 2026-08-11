@@ -66,6 +66,27 @@ expect_equal(parse_resp(paste0(  # extensions is an array, not an object
 expect_equal(parse_resp(paste0(  # a known extension with a non-integer version
     '{"extensions":{"effect_receipt":"1"},"frame_version":1,"ok":true,',
     '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+## JSON reals are not integers: the protocol requires actual JSON integers,
+## matching Jansson's json_is_integer() (janssonr keeps 1.0 a double, 1 an int).
+expect_equal(parse_resp(paste0(  # frame_version is a JSON real
+    '{"extensions":{},"frame_version":1.0,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # record_schema_version is a JSON real
+    '{"extensions":{},"frame_version":1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1.0}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # a plan schema is a JSON real
+    '{"extensions":{},"frame_version":1,"ok":true,',
+    '"plan_schemas":[1.0],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # effect_receipt is a JSON real
+    '{"extensions":{"effect_receipt":1.0},"frame_version":1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+## versions are 1-based: zero and negatives are rejected.
+expect_equal(parse_resp(paste0(  # zero version
+    '{"extensions":{},"frame_version":0,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
+expect_equal(parse_resp(paste0(  # negative version
+    '{"extensions":{},"frame_version":-1,"ok":true,',
+    '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
 
 ## ---- fail-closed with no broker (unavailable), never throws -------------
 ## Works on every platform: a missing socket is ST_UNAVAILABLE on Linux and
