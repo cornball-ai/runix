@@ -1,0 +1,9 @@
+#!/usr/bin/make -f
+# Metapackage: no upstream content. The dependency closure is generated per
+# build (exact versions of the stack actually built) and injected as the
+# runix:Depends substvar by deploy/build-debs.sh via RUNIX_STACK_DEPENDS.
+%:
+	dh $@
+
+override_dh_gencontrol:
+	dh_gencontrol -- -V"runix:Depends=$(RUNIX_STACK_DEPENDS)"

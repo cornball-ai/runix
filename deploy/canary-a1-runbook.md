@@ -4,7 +4,8 @@ Status: runbook (executable). A1 is the **Runix-only** canary slice: prove the
 whole mutation boundary on a real systemd/polkit host, with no Viento in the
 loop. Viento → rctl (transport, principal, remote policy) is a later slice (B).
 A0 — reproducible apt-installed `.deb` stack — is the deployment arc that
-follows A1 (see `build-debs.sh`, currently historical/broken).
+follows A1; **A0-dev is now proven** (see `build-debs.sh` and the A0-dev section
+at the end of this runbook).
 
 ## Why a real VM, not a container
 
@@ -134,3 +135,66 @@ socket-activated broker, driven by the unprivileged `canary` (uid 1001):
 `gates.sh` re-runs all seven as `canary`. The guest is disposable:
 `provision.sh destroy` removes the domain and all storage; nothing remains on
 the host but `~/canary`.
+
+---
+
+## A0-dev — the same stack, installed from local `.deb`s
+
+A0-dev closes the loop from "runs from source" (A1) to "installs and runs as
+`.deb`s". Same disposable-VM harness, same seven gates — but the stack is
+`apt`-installed from **local files**, no repository. No signing, no fleet
+deploy: that is A0-release (`docs/a0-packaging-plan.md`).
+
+### Build (on the host / workstation)
+
+`deploy/build-debs.sh` is a debhelper orchestrator, not a hand-rolled control
+file. It refuses a dirty/untracked source tree (a recorded commit must identify
+what `R CMD build` actually consumed) and only clears a build-output directory it
+owns. It emits six artifacts + source packages + `.buildinfo`, and a `MANIFEST`
+with pinned commits and SHA-256 sums:
+
+```
+deploy/build-debs.sh                 # -> deploy/dist/*.deb (+ .dsc, .buildinfo)
+DEB_BUILDNO=2 deploy/build-debs.sh /path/dist2   # a "+build2" upgrade set
+```
+
+The six: four R packages (`r-cornball-{runix,pkgstate,rsystemd,rctl}`), the
+audit broker (`runix-audit-broker`), and the `runix-stack` metapackage. janssonr
+is not built here (it comes from the cornball apt repo).
+
+### Install / accept (in the guest)
+
+```
+provision.sh                         # boot the disposable guest
+# stage deploy/dist/*.deb + install-debs.sh + setup-canary.sh + gates.sh, then:
+install-debs.sh /tmp/a0dev           # apt install ./*.deb (graph from local files)
+setup-canary.sh                      # unprivileged principal, units, polkit
+gates.sh                             # the seven A1 gates, apt-installed stack
+```
+
+`install-debs.sh` adds CRAN R 4.6 (key scoped via `Signed-By`, not global
+`trusted.gpg.d`) and the janssonr repo (the one deliberate `Trusted: yes`, guest
+only), then `apt-get install ./runix-stack_*.deb ./r-cornball-*.deb
+./runix-audit-broker_*.deb`. `/usr/bin/rctl` comes from the rctl `.deb` (Rscript
+launcher, no littler).
+
+### Results (2026-08-11, guest runix-canary-a1)
+
+- **install** — `apt` resolved the whole graph from local files; **7/7 gates
+  pass** against the apt-installed stack.
+- **upgrade** — `0.0.1.x` → `0.0.1.x+build2` via `apt-get install`, clean; a
+  post-upgrade `capabilities` + `restart` smoke still passes.
+- **remove/purge** — the R packages leave no `rc` residue; the durable audit
+  sink (`/var/log/runix`, runtime-created, not package-tracked) **survives both
+  remove and purge** — audit evidence is operator-owned, never an apt side
+  effect.
+
+### Findings A0-dev surfaced
+
+1. **littler can't be a hard Depends.** The distro littler is ABI-pinned to
+   R 4.3 and cannot co-install with the CRAN R (>= 4.6) the stack needs; it is
+   also only a `Suggests` in rctl's DESCRIPTION. `/usr/bin/rctl` therefore uses
+   the Rscript launcher; a CRAN-R-compatible littler returns as an optional
+   Recommends later.
+2. **Purge preserves audit evidence** (see remove/purge above) — recorded as the
+   intended semantics, consistent with "audit records are evidence".

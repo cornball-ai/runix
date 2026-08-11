@@ -126,15 +126,18 @@ virt-install --connect qemu:///system \
     --network network=default,model=virtio \
     --graphics none --noautoconsole --import
 
-echo "== wait for DHCP lease =="
+echo "== wait for DHCP lease (matched to THIS domain's interface MAC) =="
+# domifaddr --source lease reads the lease for the domain's own interface, so a
+# stale lease left by a prior same-named guest (different MAC, not yet expired)
+# is never mistaken for this one -- unlike scanning all leases and taking head -1.
 IP=""
 for _ in $(seq 1 60); do
-    IP=$($C net-dhcp-leases default 2>/dev/null \
-        | awk '/ipv4/{print $5}' | head -1 | cut -d/ -f1)
+    IP=$($C domifaddr "$NAME" --source lease 2>/dev/null \
+        | awk '/ipv4/{print $4}' | head -1 | cut -d/ -f1)
     [ -n "$IP" ] && break
     sleep 3
 done
-$C net-dhcp-leases default || true
+$C domifaddr "$NAME" --source lease || true
 if [ -z "$IP" ]; then
     echo "NO LEASE YET; check 'virsh -c qemu:///system console $NAME'" >&2
     exit 1

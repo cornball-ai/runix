@@ -1,0 +1,27 @@
+Source: r-cornball-rctl
+Section: gnu-r
+Priority: optional
+Maintainer: Troy Hernandez <troy@cornball.ai>
+Build-Depends: debhelper-compat (= 13), r-base-dev (>= 4.6.0), r-cornball-janssonr, r-cornball-runix
+Standards-Version: 4.7.0
+Homepage: https://github.com/cornball-ai/rctl
+Rules-Requires-Root: no
+
+Package: r-cornball-rctl
+Architecture: all
+Depends: ${misc:Depends}, r-base-core (>= 4.6.0), r-api-4.0, r-cornball-janssonr, r-cornball-runix
+Recommends: r-cornball-pkgstate, r-cornball-rsystemd
+Description: Runix command-line interface
+ A machine-drivable CLI over the Runix subsystem packages, covering read-only
+ introspection and managed service mutations. In machine mode (--json) it emits
+ exactly one versioned JSON envelope per invocation. Subsystem packages are
+ detected at runtime, so capability introspection succeeds even where the
+ pkgstate and rsystemd subsystems (Recommends) are absent.
+ .
+ The /usr/bin/rctl launcher uses Rscript, so the package needs no littler: it
+ matches rctl's DESCRIPTION (littler is a Suggests, not an Import) and stays
+ installable on the CRAN R the stack requires, where the distribution's
+ R-4.3-pinned littler cannot co-install. A CRAN-R-compatible littler becomes an
+ optional Recommends once one is packaged.
+ .
+ Experimental. Part of Runix (https://github.com/cornball-ai/runix).

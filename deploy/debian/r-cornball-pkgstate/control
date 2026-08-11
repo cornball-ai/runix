@@ -1,0 +1,18 @@
+Source: r-cornball-pkgstate
+Section: gnu-r
+Priority: optional
+Maintainer: Troy Hernandez <troy@cornball.ai>
+Build-Depends: debhelper-compat (= 13), r-base-dev (>= 4.6.0), r-cornball-runix
+Standards-Version: 4.7.0
+Homepage: https://github.com/cornball-ai/pkgstate
+Rules-Requires-Root: no
+
+Package: r-cornball-pkgstate
+Architecture: all
+Depends: ${misc:Depends}, r-base-core (>= 4.6.0), r-api-4.0, r-cornball-runix
+Description: read-only dpkg/apt package-state introspection for Runix
+ Read-only introspection of installed package state (dpkg and apt) for the
+ Runix framework, returning the shared Runix result model. Performs no
+ mutations.
+ .
+ Experimental. Part of Runix (https://github.com/cornball-ai/runix).
