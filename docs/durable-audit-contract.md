@@ -372,6 +372,25 @@ implementation:
 Until it exists, autonomous fleet-wide system mutation is disabled by policy
 and unprivileged system-scope mutations use the caller-owned sink above.
 
+## Audit records are evidence, not authority
+
+Runix audit records are evidence of host-side mutation intent and outcome.
+They are not authority for an external controller's desired state, scheduling,
+reconciliation, or replay of host mutations. The audit subsystem may read its
+own records for integrity checking, crash recovery, rate accounting, and
+binding an outcome to a previously persisted intent (`audit-broker-contract.md`);
+those internal continuity uses do not make the audit log a control-plane state
+store.
+
+An external controller's WAL remains authoritative for its own scheduler and
+reconciliation state. It cannot substitute for system-durable audit.
+Conversely, Runix audit records cannot settle or repair controller state.
+
+A `correlation_id` is only a cross-reference, never a bearer capability.
+Presence of an intent proves that the intent was durably recorded — not that
+its effect occurred. Effect and post-state claims come only from the
+corresponding outcome and `observed` fields.
+
 ## External requirements (declared)
 
 Zero R-package dependencies, but real system requirements on the durability

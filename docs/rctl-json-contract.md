@@ -53,6 +53,32 @@ Envelope fields (all always present):
 - `ok`: boolean discriminator. Exactly one of `result` / `error` is
   present, matching `ok`.
 
+### Result-schema evolution
+
+The envelope `schema_version` covers the envelope shape only; per-operation
+`result` schemas are versioned implicitly by (operation, schema_version) and
+documented alongside the operation. Within a fixed envelope `schema_version`,
+result fields evolve under these rules:
+
+- **Additive fields do not bump the version.** A new result field on an
+  operation is a compatible change; `schema_version` stays `1`.
+- **Old consumers ignore unknown fields.** A consumer written against an
+  earlier field set MUST tolerate result keys it does not recognize.
+- **New consumers fail closed on absent required fields.** A consumer that
+  requires a field MUST refuse (error) rather than guess when that field is
+  missing — absence is not a default value.
+- **Breaking changes bump the version.** Removing, renaming, retyping, or
+  changing the *meaning* of an existing result field is breaking and bumps
+  the envelope `schema_version`.
+
+**A field can stop being additive.** If a newly added field becomes necessary
+to interpret an existing operation *safely* — such that a consumer ignoring it
+would act on a misleading result — adding it is no longer a compatible change:
+it requires capability negotiation or a `schema_version` bump. Symmetrically, a
+consumer MAY fail closed on an optional capability it cannot obtain, but a
+producer MUST NOT silently change the meaning of an existing result under an
+unchanged version.
+
 ## Errors
 
 The `error` object is the machine rendering of the typed R conditions the
