@@ -1,3 +1,17 @@
+# runix 0.0.1.10
+
+- The audit-broker client adapter now recognizes the effect-receipt
+  capability's response shapes (`broker-effect-receipt-contract.md`):
+  `.broker_parse_response` classifies a receipt-bearing `open_ok` (with an
+  opaque `effect_receipt` token, validated distinct from the outcome binding)
+  as `open_ok_effect`, and the root helper's `redeem_receipt` success (a
+  correlation id only, no binding or `audit_scope`) as `redeem_ok`. The seven
+  new closed-set error codes (`receipt_invalid`, `receipt_expired`,
+  `receipt_redeemed`, `receipt_mismatch`, `receipt_unauthorized`,
+  `receipt_actor_mismatch`, `effect_without_receipt`) join the accepted set,
+  each pinned by a shared-corpus fixture, and a populated `capabilities`
+  response gains a golden. Parser only: the sink does not yet request effects.
+
 # runix 0.0.1.9
 
 - The audit-broker client adapter now recognizes the broker's `capabilities`

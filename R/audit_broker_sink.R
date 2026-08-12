@@ -98,21 +98,38 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
                        outcome_ok = c("ok", "persisted"),
                        emit_ok = c("audit_scope", "correlation_id", "ok", "persisted"),
                        open_ok = c("audit_scope", "binding", "correlation_id", "ok", "persisted"),
+                       ## a receipt-bearing open_intent success: open_ok plus the opaque
+                       ## effect_receipt (broker-effect-receipt-contract.md).
+                       open_ok_effect = c("audit_scope", "binding", "correlation_id",
+        "effect_receipt", "ok", "persisted"),
+                       ## the root helper's redeem_receipt success: a correlation id only
+                       ## (no binding, no audit_scope -- it opens no durable-audit record).
+                       redeem_ok = c("correlation_id", "ok", "persisted"),
                        capabilities_ok = c("extensions", "frame_version", "ok", "plan_schemas",
         "record_schema_version"),
                        error = c("error", "message", "ok"))
 
-## The broker's closed error-code set (PROTOCOL.md). Anything else in an error
-## response is itself a malformed response.
+## The broker's closed error-code set (PROTOCOL.md, plus the effect-receipt
+## capability's seven codes from broker-effect-receipt-contract.md). Anything
+## else in an error response is itself a malformed response. Each receipt code
+## is a two-sided contract element, so it is pinned here and by a fixture.
 .BROKER_ERROR_CODES <- c("bad_frame", "too_large", "bad_json",
                          "unknown_request", "schema_invalid",
                          "unknown_intent", "actor_mismatch", "rate_limited",
-                         "persist_failed", "internal")
+                         "persist_failed", "internal",
+                         ## effect-receipt capability
+                         "receipt_invalid", "receipt_expired",
+                         "receipt_redeemed", "receipt_mismatch",
+                         "receipt_unauthorized", "receipt_actor_mismatch",
+                         "effect_without_receipt")
 
 ## Documented value formats: a correlation id is a 20-digit microsecond
-## timestamp, a dash, and 16 hex chars; a binding is exactly 32 hex chars.
+## timestamp, a dash, and 16 hex chars; a binding is exactly 32 hex chars. The
+## effect_receipt is the same 128-bit-token shape as a binding (32 hex) but a
+## distinct token with a distinct purpose, so it has its own named format.
 .BROKER_CID_RE <- "^[0-9]{20}-[0-9a-f]{16}$"
 .BROKER_BINDING_RE <- "^[0-9a-f]{32}$"
+.BROKER_RECEIPT_RE <- "^[0-9a-f]{32}$"
 
 .broker_is_str <- function(x) is.character(x) && length(x) == 1L && !is.na(x)
 .broker_is_true <- function(x) is.logical(x) && length(x) == 1L && isTRUE(x)
@@ -206,7 +223,8 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
     }
     if (isTRUE(parsed$ok)) {
         kind <- NULL
-        for (k in c("open_ok", "emit_ok", "outcome_ok", "capabilities_ok")) {
+        for (k in c("open_ok", "open_ok_effect", "redeem_ok", "emit_ok",
+                    "outcome_ok", "capabilities_ok")) {
             if (setequal(nm, .BROKER_SHAPES[[k]])) {
                 kind <- k
                 break
@@ -223,22 +241,43 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
         if (!.broker_is_true(parsed$persisted)) {
             return(list(kind = "invalid", reason = "persisted not TRUE"))
         }
-        if (kind %in% c("open_ok", "emit_ok")) {
+        ## every non-capabilities success but outcome_ok carries a correlation id.
+        if (kind %in% c("open_ok", "open_ok_effect", "emit_ok", "redeem_ok")) {
             if (!.broker_is_str(parsed$correlation_id) ||
                 !grepl(.BROKER_CID_RE, parsed$correlation_id)) {
                 return(list(kind = "invalid", reason = "bad correlation_id"))
             }
-            ## the broker sink is the SYSTEM sink; any other claimed scope is a
-            ## malformed response, not a different flavour of success.
+        }
+        ## the broker sink is the SYSTEM sink; any other claimed scope is a
+        ## malformed response, not a different flavour of success. redeem_ok
+        ## carries no scope: it authorizes a commit, it opens no audit record.
+        if (kind %in% c("open_ok", "open_ok_effect", "emit_ok")) {
             if (!.broker_is_str(parsed$audit_scope) ||
                 !identical(parsed$audit_scope, "system")) {
                 return(list(kind = "invalid",
                             reason = "audit_scope not system"))
             }
-            if (identical(kind, "open_ok") &&
-                (!.broker_is_str(parsed$binding) ||
-                    !grepl(.BROKER_BINDING_RE, parsed$binding))) {
+        }
+        ## an opened intent carries the opaque single-use outcome binding.
+        if (kind %in% c("open_ok", "open_ok_effect")) {
+            if (!.broker_is_str(parsed$binding) ||
+                !grepl(.BROKER_BINDING_RE, parsed$binding)) {
                 return(list(kind = "invalid", reason = "bad binding"))
+            }
+        }
+        ## a receipt-bearing open additionally carries the opaque effect receipt,
+        ## a token independent of and distinct from the outcome binding.
+        if (identical(kind, "open_ok_effect")) {
+            if (!.broker_is_str(parsed$effect_receipt) ||
+                !grepl(.BROKER_RECEIPT_RE, parsed$effect_receipt)) {
+                return(list(kind = "invalid", reason = "bad effect_receipt"))
+            }
+            ## the two tokens have different redeemers, times, and purposes; the
+            ## contract requires them distinct. Identical values are a malformed
+            ## response, never a valid receipt-bearing open.
+            if (identical(parsed$effect_receipt, parsed$binding)) {
+                return(list(kind = "invalid",
+                            reason = "effect_receipt equals binding"))
             }
         }
         return(list(kind = kind, fields = parsed))

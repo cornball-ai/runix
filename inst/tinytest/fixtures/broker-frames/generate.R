@@ -33,6 +33,23 @@ ERROR <- '{"error":"schema_invalid","message":"nope","ok":false}'
 ## supported); the response is forward-extensible under this same shape.
 CAPS_OK <- paste0('{"extensions":{},"frame_version":1,"ok":true,',
                   '"plan_schemas":[],"record_schema_version":1}')
+## effect-receipt capability shapes (broker-effect-receipt-contract.md). The
+## effect_receipt is a distinct 128-bit token (32 hex), never equal to the
+## outcome binding; the redeem_receipt response carries only a correlation id
+## (no binding, no audit_scope); a populated capabilities response advertises
+## effect_receipt:1 and a plan schema.
+RECEIPT <- "1b9d6bcd1e7f4a3bd2c5e8f0a4d7c9e2"
+OPEN_OK_EFFECT <- sprintf(
+    paste0('{"audit_scope":"system","binding":"%s","correlation_id":"%s",',
+           '"effect_receipt":"%s","ok":true,"persisted":true}'),
+    BINDING, CID, RECEIPT)
+REDEEM_OK <- sprintf('{"correlation_id":"%s","ok":true,"persisted":true}', CID)
+CAPS_EFFECT <- paste0('{"extensions":{"effect_receipt":1},"frame_version":1,',
+                      '"ok":true,"plan_schemas":[1],"record_schema_version":1}')
+## an error body for a given closed-set code (keys sorted, as the broker emits).
+mk_err <- function(code) {
+    sprintf('{"error":"%s","message":"nope","ok":false}', code)
+}
 
 ## body fixtures: name, accept, tag (kind for accepts; reject category else),
 ## body bytes
@@ -42,6 +59,20 @@ bodies <- list(
     list("emit_ok", TRUE, "emit_ok", EMIT_OK),
     list("capabilities_ok", TRUE, "capabilities_ok", CAPS_OK),
     list("error", TRUE, "error", ERROR),
+    ## effect-receipt capability accepts
+    list("open_ok_effect", TRUE, "open_ok_effect", OPEN_OK_EFFECT),
+    list("redeem_ok", TRUE, "redeem_ok", REDEEM_OK),
+    list("caps_effect_receipt", TRUE, "capabilities_ok", CAPS_EFFECT),
+    list("error_receipt_invalid", TRUE, "error", mk_err("receipt_invalid")),
+    list("error_receipt_expired", TRUE, "error", mk_err("receipt_expired")),
+    list("error_receipt_redeemed", TRUE, "error", mk_err("receipt_redeemed")),
+    list("error_receipt_mismatch", TRUE, "error", mk_err("receipt_mismatch")),
+    list("error_receipt_unauthorized", TRUE, "error",
+         mk_err("receipt_unauthorized")),
+    list("error_receipt_actor_mismatch", TRUE, "error",
+         mk_err("receipt_actor_mismatch")),
+    list("error_effect_without_receipt", TRUE, "error",
+         mk_err("effect_without_receipt")),
     list("dup_toplevel", FALSE, "dup", '{"ok":true,"ok":true,"persisted":true}'),
     list("dup_nested", FALSE, "dup",
          '{"ok":true,"persisted":true,"x":{"a":1,"a":2}}'),
@@ -51,6 +82,16 @@ bodies <- list(
          sub(CID, "not-a-real-id", OPEN_OK, fixed = TRUE)),
     list("binding_bad_format", FALSE, "semantic",
          sub(BINDING, "XYZ", OPEN_OK, fixed = TRUE)),
+    ## a malformed effect_receipt token, and a redeem_ok with a bad correlation
+    ## id, are semantic rejects (exact shape, wrong value format)
+    list("receipt_bad_format", FALSE, "semantic",
+         sub(RECEIPT, "XYZ", OPEN_OK_EFFECT, fixed = TRUE)),
+    ## the effect receipt must be distinct from the binding: identical tokens
+    ## (a well-formed shape, colliding values) are a semantic reject
+    list("receipt_equals_binding", FALSE, "semantic",
+         sub(RECEIPT, BINDING, OPEN_OK_EFFECT, fixed = TRUE)),
+    list("redeem_cid_bad_format", FALSE, "semantic",
+         sub(CID, "not-a-real-id", REDEEM_OK, fixed = TRUE)),
     list("error_code_unknown", FALSE, "semantic",
          '{"error":"made_up_code","message":"nope","ok":false}'),
     list("extra_key", FALSE, "schema", '{"ok":true,"persisted":true,"extra":1}'),
