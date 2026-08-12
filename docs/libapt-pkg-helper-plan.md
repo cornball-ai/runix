@@ -269,7 +269,11 @@ resource, plan_schema, plan_hash } }`. The broker verifies uid-0 redeemer,
 principal == bound actor, verb/resource/plan_hash/plan_schema == bound,
 TTL/boot-id, single-use, marks redeemed durably (fsync) before replying.
 **Commit only on a valid `redeem_ok`.** Any failure/timeout/disconnect →
-`runix_no_intent`, no commit (at-most-once, biased to *not applied*).
+`runix_no_intent`, no commit (at-most-once, biased to *not applied*). The helper
+also **requires the `redeem_ok`'s `correlation_id` to equal the request's
+`correlation_id`** before it commits and before it stamps the native-transaction
+marker (below); a mismatch is `runix_no_intent`, no commit — so a valid receipt
+can never be committed and logged under a substituted operation id.
 
 ### Native-transaction marker
 
