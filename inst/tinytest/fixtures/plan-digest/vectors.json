@@ -1,0 +1,109 @@
+{
+  "digest_schema": 1,
+  "grammar": "SHA-256 over: \"1\" RS verb RS then records joined by RS; each record is its per-verb fields joined by US; records sorted bytewise ascending. US=0x1f, RS=0x1e. Empty descriptor = prefix followed by nothing. See broker-effect-receipt-contract.md 'Plan digest'.",
+  "note": "canonical_hex is the exact canonical byte string; sha256 is its SHA-256, both computed independently of any encoder (printf -> xxd/sha256sum). `records` is the encoder INPUT and is deliberately stored UNSORTED where ordering matters (multi-record, flags, components, options) so a conforming encoder must produce canonical_hex. Both the R and the C (pkgexec) encoders must reproduce canonical_hex and sha256 for every vector.",
+  "vectors": [
+    {
+      "name": "install_empty", "verb": "apt.install", "records": [],
+      "canonical_hex": "311e6170742e696e7374616c6c1e",
+      "sha256": "fabfb6fa4b971856535e447edb78fa3583327037158d7838f99ee7226c406a57"
+    },
+    {
+      "name": "install_single", "verb": "apt.install",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "install", "from_version": "", "to_version": "1.24.0-1", "flags": []}
+      ],
+      "canonical_hex": "311e6170742e696e7374616c6c1e6e67696e781f616d6436341f696e7374616c6c1f1f312e32342e302d311f",
+      "sha256": "80a7a295ea0b737188f9a3e7b41a2aa9423d7a88da22b85e0f79e5350af9a774"
+    },
+    {
+      "name": "install_multi", "verb": "apt.install",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "install", "from_version": "", "to_version": "1.24.0-1", "flags": []},
+        {"package": "libpcre3", "architecture": "amd64", "action": "install", "from_version": "", "to_version": "2:8.39-15", "flags": ["auto"]}
+      ],
+      "canonical_hex": "311e6170742e696e7374616c6c1e6c696270637265331f616d6436341f696e7374616c6c1f1f323a382e33392d31351f6175746f1e6e67696e781f616d6436341f696e7374616c6c1f1f312e32342e302d311f",
+      "sha256": "795492c92e4ccbaa608af619a0f9046a3d3b82cc08d6211ebef1ee82d87b4b4f"
+    },
+    {
+      "name": "install_flags_sort", "verb": "apt.install",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "install", "from_version": "", "to_version": "1.24.0-1", "flags": ["protected", "auto", "essential"]}
+      ],
+      "canonical_hex": "311e6170742e696e7374616c6c1e6e67696e781f616d6436341f696e7374616c6c1f1f312e32342e302d311f6175746f2c657373656e7469616c2c70726f746563746564",
+      "sha256": "7e2285d14f7602a107b96c13f605eaf22462185e0b0f3f91c2b36755165e7250"
+    },
+    {
+      "name": "remove_single", "verb": "apt.remove",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "remove", "from_version": "1.24.0-1", "to_version": "", "flags": []}
+      ],
+      "canonical_hex": "311e6170742e72656d6f76651e6e67696e781f616d6436341f72656d6f76651f312e32342e302d311f1f",
+      "sha256": "1e218d2a0b3cadb584b3fbb40d73be5d4ecaca17d4782f3a50ea97595176fb13"
+    },
+    {
+      "name": "purge_single", "verb": "apt.purge",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "purge", "from_version": "1.24.0-1", "to_version": "", "flags": []}
+      ],
+      "canonical_hex": "311e6170742e70757267651e6e67696e781f616d6436341f70757267651f312e32342e302d311f1f",
+      "sha256": "51617e77d35c233ae36ad6f702c75dcc11ed04356d3fd6597449e0f4113d4a1e"
+    },
+    {
+      "name": "upgrade_single", "verb": "apt.upgrade",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "upgrade", "from_version": "1.24.0-1", "to_version": "1.24.0-2", "flags": []}
+      ],
+      "canonical_hex": "311e6170742e757067726164651e6e67696e781f616d6436341f757067726164651f312e32342e302d311f312e32342e302d321f",
+      "sha256": "63114d555373781406966cfa2c5234d9c782d5bc84e3e79563e633e992e3a2d4"
+    },
+    {
+      "name": "dist_upgrade_single", "verb": "apt.dist_upgrade",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "action": "upgrade", "from_version": "1.24.0-1", "to_version": "1.25.0-1", "flags": []}
+      ],
+      "canonical_hex": "311e6170742e646973745f757067726164651e6e67696e781f616d6436341f757067726164651f312e32342e302d311f312e32352e302d311f",
+      "sha256": "78d21d62cbea1229964631946446b6ab70fe0f537e09e936a577d45d4227b51d"
+    },
+    {
+      "name": "configure_single", "verb": "apt.configure",
+      "records": [
+        {"package": "nginx", "architecture": "amd64", "current_version": "1.24.0-1", "state": "half-configured"}
+      ],
+      "canonical_hex": "311e6170742e636f6e6669677572651e6e67696e781f616d6436341f312e32342e302d311f68616c662d636f6e66696775726564",
+      "sha256": "87d10ef4b052425447c50d51564ac9f44e00a8f410fe8927f435420a0e23c905"
+    },
+    {
+      "name": "hold_single", "verb": "apt.hold",
+      "records": [
+        {"package": "nginx", "from_state": "install", "to_state": "hold"}
+      ],
+      "canonical_hex": "311e6170742e686f6c641e6e67696e781f696e7374616c6c1f686f6c64",
+      "sha256": "756ff19107155ca5d98792aeca9538cb82a1e395fba777ceb69a475f77277712"
+    },
+    {
+      "name": "unhold_single", "verb": "apt.unhold",
+      "records": [
+        {"package": "nginx", "from_state": "hold", "to_state": "install"}
+      ],
+      "canonical_hex": "311e6170742e756e686f6c641e6e67696e781f686f6c641f696e7374616c6c",
+      "sha256": "e8962d965aff0b8e42191b991ffd89104b94dac3dcc0b4ca243f54f11d7f7b93"
+    },
+    {
+      "name": "update_single", "verb": "apt.update",
+      "records": [
+        {"uri": "http://archive.ubuntu.com/ubuntu", "suite": "noble", "components": ["universe", "main"], "options": {"signed-by": "/usr/share/keyrings/ubuntu-archive-keyring.gpg"}}
+      ],
+      "canonical_hex": "311e6170742e7570646174651e687474703a2f2f617263686976652e7562756e74752e636f6d2f7562756e74751f6e6f626c651f6d61696e2c756e6976657273651f7369676e65642d62793d2f7573722f73686172652f6b657972696e67732f7562756e74752d617263686976652d6b657972696e672e677067",
+      "sha256": "9a9bc410f8e27f0ad4e69c3830fcfea88b8c9f1d7d3b178c7fd89596c64c8bc5"
+    },
+    {
+      "name": "update_opts_sort", "verb": "apt.update",
+      "records": [
+        {"uri": "http://archive.ubuntu.com/ubuntu", "suite": "noble", "components": ["universe", "main"], "options": {"trusted": "yes", "signed-by": "/usr/share/keyrings/ubuntu-archive-keyring.gpg", "architectures": "amd64"}}
+      ],
+      "canonical_hex": "311e6170742e7570646174651e687474703a2f2f617263686976652e7562756e74752e636f6d2f7562756e74751f6e6f626c651f6d61696e2c756e6976657273651f617263686974656374757265733d616d6436342c7369676e65642d62793d2f7573722f73686172652f6b657972696e67732f7562756e74752d617263686976652d6b657972696e672e6770672c747275737465643d796573",
+      "sha256": "dbc0ea96ab0024d8179784b10991458904af9cd6618dcad9d44a679fdbe0692c"
+    }
+  ]
+}
