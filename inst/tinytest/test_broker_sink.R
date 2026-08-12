@@ -104,6 +104,12 @@ expect_equal(parse_resp(sprintf(paste0(
     '{"audit_scope":"system","binding":"%s","correlation_id":"%s",',
     '"effect_receipt":"nothex","ok":true,"persisted":true}'),
     rbind, rcid))$kind, "invalid")
+## effect_receipt must be distinct from the binding: identical (well-formed)
+## tokens are a malformed response, not a valid receipt-bearing open.
+expect_equal(parse_resp(sprintf(paste0(
+    '{"audit_scope":"system","binding":"%s","correlation_id":"%s",',
+    '"effect_receipt":"%s","ok":true,"persisted":true}'),
+    rbind, rcid, rbind))$kind, "invalid")
 ## redeem_ok is a correlation id only -- no binding, no audit_scope:
 expect_equal(parse_resp(sprintf(
     '{"correlation_id":"%s","ok":true,"persisted":true}', rcid))$kind,

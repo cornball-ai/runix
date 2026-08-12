@@ -20,6 +20,7 @@ scope_not_system	body	0	semantic	scope_not_system.json
 cid_bad_format	body	0	semantic	cid_bad_format.json
 binding_bad_format	body	0	semantic	binding_bad_format.json
 receipt_bad_format	body	0	semantic	receipt_bad_format.json
+receipt_equals_binding	body	0	semantic	receipt_equals_binding.json
 redeem_cid_bad_format	body	0	semantic	redeem_cid_bad_format.json
 error_code_unknown	body	0	semantic	error_code_unknown.json
 extra_key	body	0	schema	extra_key.json

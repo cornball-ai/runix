@@ -86,6 +86,10 @@ bodies <- list(
     ## id, are semantic rejects (exact shape, wrong value format)
     list("receipt_bad_format", FALSE, "semantic",
          sub(RECEIPT, "XYZ", OPEN_OK_EFFECT, fixed = TRUE)),
+    ## the effect receipt must be distinct from the binding: identical tokens
+    ## (a well-formed shape, colliding values) are a semantic reject
+    list("receipt_equals_binding", FALSE, "semantic",
+         sub(RECEIPT, BINDING, OPEN_OK_EFFECT, fixed = TRUE)),
     list("redeem_cid_bad_format", FALSE, "semantic",
          sub(CID, "not-a-real-id", REDEEM_OK, fixed = TRUE)),
     list("error_code_unknown", FALSE, "semantic",

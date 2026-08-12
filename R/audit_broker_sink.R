@@ -265,11 +265,19 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
                 return(list(kind = "invalid", reason = "bad binding"))
             }
         }
-        ## a receipt-bearing open additionally carries the opaque effect receipt.
+        ## a receipt-bearing open additionally carries the opaque effect receipt,
+        ## a token independent of and distinct from the outcome binding.
         if (identical(kind, "open_ok_effect")) {
             if (!.broker_is_str(parsed$effect_receipt) ||
                 !grepl(.BROKER_RECEIPT_RE, parsed$effect_receipt)) {
                 return(list(kind = "invalid", reason = "bad effect_receipt"))
+            }
+            ## the two tokens have different redeemers, times, and purposes; the
+            ## contract requires them distinct. Identical values are a malformed
+            ## response, never a valid receipt-bearing open.
+            if (identical(parsed$effect_receipt, parsed$binding)) {
+                return(list(kind = "invalid",
+                            reason = "effect_receipt equals binding"))
             }
         }
         return(list(kind = kind, fields = parsed))
