@@ -64,7 +64,7 @@ Read-only, no mutation, no privileged code:
    human UID (e.g. Viento), every process under that UID gains the grant — use a
    dedicated service account where that is unacceptable. Added narrowly to
    `apt-mutation-boundary-contract.md`.
-2. **A separate `runix-apt-helper` repo.** libapt and mutation authority stay out
+2. **A separate `pkgexec` repo.** libapt and mutation authority stay out
    of the audit broker (which stays single-purpose and libapt-free). The new repo
    reuses the broker's build/CI/hardening/packaging and **vendors the shared
    plan-digest golden corpus** (the one source of truth R also uses).
@@ -74,10 +74,10 @@ Read-only, no mutation, no privileged code:
    path." No mode multiplexing. This also fixes the contract's "risk-class" vs
    "per-verb" language (reconciled to per-verb in the contract, same PR).
 
-## Repository and layout (`runix-apt-helper`)
+## Repository and layout (`pkgexec`)
 
 ```
-runix-apt-helper/
+pkgexec/
   src/            libapt context, policy enforcement, plan digest (OpenSSL EVP),
                   broker redeem client, strict stdin parse (Jansson);
                   9 tiny per-verb main.cc, each a distinct binary
