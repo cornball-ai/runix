@@ -88,6 +88,42 @@ expect_equal(parse_resp(paste0(  # negative version
     '{"extensions":{},"frame_version":-1,"ok":true,',
     '"plan_schemas":[],"record_schema_version":1}'))$kind, "invalid")
 
+## ---- effect-receipt shapes: receipt-bearing open, redeem, new errors -----
+## The shared goldens above pin the happy shapes; these pin the classifier's
+## strictness on the receipt additions (broker-effect-receipt-contract.md).
+rcid <- "00001786382512165708-a061ec02cffe1b2b"
+rbind <- "c7eb72753bf700824daf45442abd39c2"
+rrcpt <- "1b9d6bcd1e7f4a3bd2c5e8f0a4d7c9e2"
+## a receipt-bearing open_ok classifies distinctly from a plain open_ok:
+expect_equal(parse_resp(sprintf(paste0(
+    '{"audit_scope":"system","binding":"%s","correlation_id":"%s",',
+    '"effect_receipt":"%s","ok":true,"persisted":true}'),
+    rbind, rcid, rrcpt))$kind, "open_ok_effect")
+## a malformed effect_receipt is rejected, never downgraded to a plain open_ok:
+expect_equal(parse_resp(sprintf(paste0(
+    '{"audit_scope":"system","binding":"%s","correlation_id":"%s",',
+    '"effect_receipt":"nothex","ok":true,"persisted":true}'),
+    rbind, rcid))$kind, "invalid")
+## redeem_ok is a correlation id only -- no binding, no audit_scope:
+expect_equal(parse_resp(sprintf(
+    '{"correlation_id":"%s","ok":true,"persisted":true}', rcid))$kind,
+    "redeem_ok")
+## a redeem_ok with a bad correlation id is rejected:
+expect_equal(parse_resp('{"correlation_id":"nope","ok":true,"persisted":true}'
+    )$kind, "invalid")
+## a 4-key body matching no exact shape (binding without audit_scope) is invalid:
+expect_equal(parse_resp(sprintf(
+    '{"binding":"%s","correlation_id":"%s","ok":true,"persisted":true}',
+    rbind, rcid))$kind, "invalid")
+## each new receipt error code is inside the closed set:
+for (code in c("receipt_invalid", "receipt_expired", "receipt_redeemed",
+               "receipt_mismatch", "receipt_unauthorized",
+               "receipt_actor_mismatch", "effect_without_receipt")) {
+    expect_equal(parse_resp(sprintf(
+        '{"error":"%s","message":"m","ok":false}', code))$kind, "error",
+        info = code)
+}
+
 ## ---- fail-closed with no broker (unavailable), never throws -------------
 ## Works on every platform: a missing socket is ST_UNAVAILABLE on Linux and
 ## ST_UNSUPPORTED off it -- both map to runix_broker_unavailable. A failed
