@@ -38,7 +38,7 @@ implementable against the **shipped** audit broker (`runix-audit-broker`
    ownership uses rapt's exact predicate across the whole computed transaction.
 6. **The privileged boundary is not bypassable** (security review). Authorization
    is bound to **distinct immutable entrypoint paths** — `pkexec` selects the
-   action by exec-path, not `argv` — one per risk class. The helper enforces the
+   action by exec-path, not `argv` — one per verb (nine). The helper enforces the
    whole policy on the plan it commits, made **atomic under one `libapt-pkg`
    context** (C++ linked directly, no R) so the validated plan is the executed
    plan (no simulate-then-execute TOCTOU; this pulls libapt into v1). "No effect
@@ -156,18 +156,24 @@ at the prompt. Options considered:
 **Recommendation:** option 2 for v1, with a strict split of duties and
 **verb-level** authorization enforced on the privileged side.
 
-*Authorization is per risk class, bound to distinct entrypoint paths.* `pkexec`
+*Authorization is per verb, bound to distinct entrypoint paths.* `pkexec`
 selects a polkit action by the **executable-path** annotation on the action, not
 by the program's arguments — it does not validate `argv`. So the verb cannot be
-an argument the helper merely "checks": each risk class is a **distinct, immutable
-helper entrypoint path**, and each path is bound to its own polkit action
-(`ai.cornball.runix.apt.update`, `...apt.install`, `...apt.remove` [`auth_admin`],
-`...apt.configure`, `...apt.hold`/`...apt.unhold`). The verb is fixed by *which
-binary path* was invoked; the code reachable from the `update` entrypoint cannot
-reach install/remove. Never rely on `command_line` or a caller-controlled
-`argv[0]`. A caller who skips the R layer still lands on one specific path and its
-one specific action — an umbrella action, or verb-by-argument, would collapse the
-boundary.
+an argument the helper merely "checks": each **verb** is a **distinct, immutable
+helper entrypoint path**, and each path is bound to its own polkit action — nine
+in all: `ai.cornball.runix.apt.update`, `...apt.install`, `...apt.remove`,
+`...apt.purge`, `...apt.upgrade`, `...apt.dist_upgrade`, `...apt.configure`,
+`...apt.hold`, `...apt.unhold` (all but `update` and `hold` default to
+`auth_admin`). The verb is fixed by *which binary path* was invoked; the code
+reachable from the `update` entrypoint cannot reach install/remove. **No
+`mode`/variant argument selects behaviour within a binary:** a receipt proves
+plan integrity, not authorization, so admitting `purge` through the
+remove-authorized path (or `dist_upgrade` through `upgrade`) would weaken the
+boundary — `remove`/`purge` and `upgrade`/`dist_upgrade` are separate binaries
+and separate actions, not one path with a mode. Never rely on `command_line` or a
+caller-controlled `argv[0]`. A caller who skips the R layer still lands on one
+specific path and its one specific action — an umbrella action, or verb-by-
+argument, would collapse the boundary.
 
 *The machine path never prompts.* Merely registering no agent is not enough — a
 desktop agent may already exist, and `pkexec` permits interactive authentication.
@@ -179,6 +185,19 @@ interaction. A `challenge` or `deny` result returns a typed refusal
 denial); the prompting path is never entered. The non-interactive check is made
 first, and the helper is launched only on an already-authorized result — the
 `--json` caller can never surface a prompt.
+
+*Autonomous verbs are granted to an opt-in group, never to a UID by default.*
+`apt.update` and `apt.hold` are `requires_authorization = TRUE` but
+`approval_required = FALSE`, so an agent runs them with no human — which polkit
+must authorize non-interactively. A shipped polkit **rules** file grants **only**
+those two actions, and **only** to members of a dedicated system group
+`runix-apt-autonomous`, created **empty** by the package and never auto-enrolled;
+every other action defaults to `auth_admin`, so a human is prompted at a TTY and
+machine mode gets a `challenge`. The grant is on the **group**, not a UID: if an
+agent shares a human UID (for example a Viento process running as the logged-in
+user), every process under that UID inherits the grant, so a deployment that
+cannot accept that runs the agent under a **dedicated service account** added to
+the group. Membership is an explicit operator act, never a default.
 
 *The helper enforces the whole policy independently, and the plan it enforces is
 the plan it commits.* Before acting, the native helper **recomputes the full
