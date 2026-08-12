@@ -242,7 +242,19 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    tagged `v0.0.1` with a `.deb`; the R adapter is folded into `runix`; the full
    chain (unprivileged client -> root broker -> root-owned durable system record
    across a broker restart) is proven in CI, including a systemd-VM integration
-   gate.
+   gate. **Effect-receipt capability added (2026-08-12, runix-audit-broker #3 +
+   runix #55):** a versioned wire extension beyond v0.0.1's request types. An
+   `open_intent` that flags `effect` is issued a single-use receipt (a 128-bit
+   token; only its SHA-256 verifier is persisted, never the token); a
+   `redeem_receipt` request redeems it token-addressed (no cid on the wire —
+   the broker hashes the token to a verifier and looks the intent up), under
+   uid-0 with the redeeming principal matched to the bound actor, verb/resource/
+   plan matched, `CLOCK_BOOTTIME` TTL + boot-id invalidation, single-use, durable
+   issued->redeemed before the ok. An effect-flagged outcome without a redeemed
+   receipt is refused (`effect_without_receipt`). Advertised as
+   `extensions.effect_receipt: 1` / `plan_schemas: [1]` only once all of that is
+   backed. This is the broker-side execution authority the apt pkexec helper
+   redeems before a commit (`broker-effect-receipt-contract.md`).
 
 ## Immediate sequence
 
@@ -269,15 +281,19 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    gated by a required `packaging` CI check, proven on disposable guests
    (install/upgrade/remove + A1 gates) — **done**. **A0-release** (the signed
    public archive) is **deferred**.
-7. **apt mutation boundary** — the next arc. A *second pass* on the contract
+7. **apt mutation boundary** — the current arc. A *second pass* on the contract
    (`apt-mutation-boundary-contract.md`) before code: authorization vs approval
    (distinct axes), transaction identity, dpkg locking, recovery from
    interrupted transactions, and package ownership. pkgstate stays **read-only**;
    mutations live in a separate sibling/helper (provisionally `pkgops`), rapt
-   left as the narrow r2u backend. Verification ladder: contract → helper/API →
-   fixture tests → a minimal destructive **disposable-VM** gate (dpkg locking,
-   maintainer scripts, interrupted transactions, conffiles, and partial states
-   cannot be faked in fixtures). **← next arc.**
+   left as the narrow r2u backend. **First unit done (2026-08-12):** the audit
+   broker's effect-receipt capability (gap 8) — the durable execution authority
+   the pkexec helper redeems before a dpkg commit — is built and merged
+   (runix-audit-broker #3, runix #55). Remaining: the `libapt-pkg`/pkexec helper
+   that redeems a receipt before committing, then `pkgops`. Verification ladder:
+   contract → helper/API → fixture tests → a minimal destructive **disposable-VM**
+   gate (dpkg locking, maintainer scripts, interrupted transactions, conffiles,
+   and partial states cannot be faked in fixtures). **← current arc.**
 8. apt mutation implementation; then gaps 4–6 incrementally.
 
 ## Validation: the workflow that must be materially better
