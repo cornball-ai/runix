@@ -89,11 +89,11 @@ pkgexec/
 
 ## 1. Entrypoints and polkit actions (nine, per verb)
 
-Nine genuinely distinct binaries under `/usr/libexec/runix/`, one polkit action
+Nine genuinely distinct binaries under `/usr/libexec/pkgexec/`, one polkit action
 each, verb fixed by **which binary was exec'd** — never `argv`, never `argv[0]`,
 no umbrella action, no symlink multiplexing:
 
-| binary (`/usr/libexec/runix/`) | polkit action (`ai.cornball.runix.`) | autonomy |
+| binary (`/usr/libexec/pkgexec/`) | polkit action (`ai.cornball.runix.`) | autonomy |
 |---|---|---|
 | `runix-apt-update` | `apt.update` | autonomous |
 | `runix-apt-install` | `apt.install` | approval (`auth_admin`) |
@@ -126,7 +126,7 @@ no umbrella action, no symlink multiplexing:
 
 ## 2. Receipt transport (stdin, never argv/env)
 
-The R caller spawns `pkexec /usr/libexec/runix/runix-apt-<verb>` with a **pipe on
+The R caller spawns `pkexec /usr/libexec/pkgexec/runix-apt-<verb>` with a **pipe on
 stdin**, writes one strict request, and closes the write end. `pkexec` passes
 stdio through unchanged; the helper reads fd 0.
 
@@ -371,10 +371,11 @@ Modeled on `runix-audit-broker/debian/`:
   `libjansson-dev`, `libssl-dev` (OpenSSL EVP for the digest), `pkg-config`.
 - **Depends:** `${shlibs:Depends}` (auto-pulls `libapt-pkg6.0t64`, `libjansson4`,
   `libssl3`), `${misc:Depends}`.
-- **Installs:** 9 binaries → `/usr/libexec/runix/`; 9 `*.policy` →
-  `/usr/share/polkit-1/actions/`; one rules file → `/etc/polkit-1/rules.d/`
-  granting the two autonomous actions to `runix-apt-autonomous`. A maintainer
-  script creates the group **empty** (`addgroup --system runix-apt-autonomous`),
+- **Installs:** 9 binaries → `/usr/libexec/pkgexec/`; one `*.policy` (nine
+  actions) → `/usr/share/polkit-1/actions/`; one rules file →
+  `/usr/share/polkit-1/rules.d/` granting the two autonomous actions to
+  `runix-apt-autonomous`. A maintainer script creates the group **empty**
+  (`addgroup --system runix-apt-autonomous`),
   never adding members.
 - Fits the A0 `.deb` stack (`a0-packaging-plan.md`) as an added package; the
   `runix-stack` closure and the `packaging` CI gate extend to it.
