@@ -263,9 +263,16 @@ before privileged code.
 
 ### Redeem (all four)
 
-Connect to the broker's fixed socket as root; send `redeem_receipt {
-effect_receipt (stdin), principal_uid (PKEXEC_UID), effect { operation=verb,
-resource, plan_schema, plan_hash } }`. The broker verifies uid-0 redeemer,
+Connect to the broker's fixed socket as root. **Authenticate the broker before
+the token is sent:** after `connect()` and before any byte is written, the
+helper reads `SO_PEERCRED` on the connected socket and requires peer uid 0 —
+the kernel-verified credentials of the process that bound/listens on the
+socket (the broker, or systemd's activation listener). Any other uid → close
+the socket with nothing written → `runix_no_intent`. The receipt token is
+never written to an unauthenticated peer, so a squatted or misconfigured
+socket path cannot harvest it. Then send `redeem_receipt { effect_receipt
+(stdin), principal_uid (PKEXEC_UID), effect { operation=verb, resource,
+plan_schema, plan_hash } }`. The broker verifies uid-0 redeemer,
 principal == bound actor, verb/resource/plan_hash/plan_schema == bound,
 TTL/boot-id, single-use, marks redeemed durably (fsync) before replying.
 **Commit only on a valid `redeem_ok`.** Any failure/timeout/disconnect →
@@ -274,6 +281,16 @@ also **requires the `redeem_ok`'s `correlation_id` to equal the request's
 `correlation_id`** before it commits and before it stamps the native-transaction
 marker (below); a mismatch is `runix_no_intent`, no commit — so a valid receipt
 can never be committed and logged under a substituted operation id.
+
+On that valid `redeem_ok`, the commit runs **in the same libapt context that
+was digested**: the same open cache/dep-cache instance whose resolved state
+produced the redeemed `plan_hash`, under the same continuously-held lock (§4).
+The helper never closes/reopens the cache, drops/reacquires the lock, or
+re-resolves between digest, redeem, and commit — a re-resolve after redemption
+would sever the digest↔commit binding the receipt exists to prove. If the
+context or lock is lost after `redeem_ok`, the receipt is already spent and the
+helper fails **without committing**; that is the same redeemed-no-outcome case
+as a mid-commit crash, reconciled by the caller against dpkg ground truth (§7).
 
 ### Native-transaction marker
 
