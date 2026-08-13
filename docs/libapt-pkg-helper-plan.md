@@ -205,12 +205,14 @@ The receipt binds `resource`, so R (at issue) and the helper (at redeem) must
 derive it identically **from the request alone** — R does no atomic resolve, so
 `resource` must not depend on resolved dependencies (those live in `plan_hash`):
 
-- **install/remove/purge/upgrade/dist_upgrade with explicit targets, and
-  hold/unhold:** `resource` = the requested **target** package names,
-  bytewise-sorted ascending, comma-joined, under the digest's delimiter-safety
-  rule.
-- **targetless full upgrade/dist_upgrade:** `resource` = `""` (whole-system); the
-  resolved set is carried by `plan_hash`.
+- **install/remove/purge with explicit targets, and hold/unhold:** `resource` =
+  the requested **target** package names, bytewise-sorted ascending, comma-joined,
+  under the digest's delimiter-safety rule.
+- **upgrade/dist_upgrade (whole-system, v1):** `resource` = `""`. In v1 these are
+  whole-system only — the request carries **no** targets and the helper rejects a
+  targeted upgrade (`schema_invalid`) rather than silently widening it to the
+  whole system; the resolved set is carried by `plan_hash`. Target-scoped
+  upgrades are a later addition (they would take the target-names rule above).
 - **update:** `resource` = `""` (full refresh) or the sorted source identifiers
   if a subset is requested; the source descriptor is in `plan_hash`.
 - **configure:** `resource` = `pending` (the pending-config set); the set is in
