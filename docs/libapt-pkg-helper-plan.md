@@ -256,7 +256,11 @@ transaction. The digest is the hold descriptor (package/from_state/to_state).
 
 **D. configure** (`dpkg --configure -a`): runs the pending-config pass; **no**
 `pkgAcquire`, **no** resolver. Takes the dpkg frontend lock. The digest is the
-configure descriptor over the pending-config set. Broken-state check applies.
+configure descriptor over the pending-config set. **Ownership still applies**:
+the pending set is not selectable, but configuring an `r-*` package runs its
+maintainer scripts — a mutation of a rapt-owned package — so a rapt-owned member
+is `runix_package_not_owned` **before** the receipt is spent. Broken-state check
+applies.
 
 Exact libapt symbols for each lock/resolve/commit path are confirmed at step 0,
 before privileged code.
