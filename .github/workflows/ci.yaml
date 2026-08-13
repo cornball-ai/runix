@@ -220,3 +220,22 @@ jobs:
           sudo stat -c '%U %a' /var/log/runix/audit.jsonl > /tmp/rab-sink-perms.txt
           export RAB_CLIENT_UID="$(id -u)"
           Rscript .github/integration/inspect.R
+
+  # Lightweight validation of the VM-only apt-mutation canary payload
+  # (deploy/canary-apt): shell syntax, the C lock-holder, and the jq redactor. The
+  # payload itself runs only on a disposable guest; this just keeps it well-formed.
+  canary-apt-payload:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq shellcheck
+      - name: Syntax gates (bash -n, cc -fsyntax-only, jq filter)
+        run: |
+          set -e
+          for f in deploy/canary-apt/*.sh; do bash -n "$f"; done
+          cc -fsyntax-only deploy/canary-apt/fcntl-lock.c
+          echo '{}' | jq -f deploy/canary-apt/redact.jq >/dev/null
+      - name: shellcheck (advisory)
+        continue-on-error: true
+        run: shellcheck -S warning deploy/canary-apt/*.sh
