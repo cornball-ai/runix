@@ -167,17 +167,24 @@ pinned — not left to "hash the plan":
     removal), and `flags` is a bytewise-sorted comma list from the fixed enum
     `{hold, auto, essential, protected}`.
   - `apt.configure`: `package │ architecture │ current_version │ state`, `state`
-    from the exact dpkg status enum `{half-installed, unpacked, half-configured,
-    triggers-awaited, triggers-pending}` (the states `dpkg --configure -a` acts
-    on); any other status is not a configure target.
+    from the exact dpkg status enum `{unpacked, half-configured, triggers-awaited,
+    triggers-pending}` — the states `dpkg --configure -a` actually configures. A
+    `half-installed` package (an interrupted unpack) is **not** a configure target:
+    `--configure` cannot repair it, so it is an *observed blocker* — the helper
+    refuses with `runix_dpkg_broken` **before** the receipt is spent, never
+    encoding it into the descriptor. Any other status is not a configure target.
   - `apt.hold`/`apt.unhold`: `package │ from_state │ to_state`, `state ∈
     {hold, install}` (the exact dpkg selection states).
   - `apt.update`: `uri │ suite │ components │ options` — no package fields;
     `components` is a bytewise-sorted comma list, and `options` is a
     bytewise-sorted `k=v` comma list over the **fixed key set**
     `{signed-by, architectures, trusted}` (the identity-relevant deb822 source
-    fields); keys outside the set are excluded from the digest, and values obey
-    the delimiter rule above. **Boundary:** this digest proves the *configured
+    fields). A multi-valued option is a bytewise-sorted **space-separated** list
+    inside the value (space is not a separator), so `architectures` is the source's
+    sorted arch set joined by single spaces (`amd64 arm64`); `trusted` is the
+    explicit `[trusted=yes|no]` override that bypasses signature checks, not
+    computed trust. Keys outside the set are excluded from the digest, and values
+    obey the delimiter rule above. **Boundary:** this digest proves the *configured
     source set*, not the remote content later fetched from those sources — remote
     payloads are outside the receipt's scope, and tests and messaging must say so.
 - **Golden vectors** for each verb (including empty and single-record cases) are
