@@ -363,7 +363,11 @@ Minimal destructive acceptance on a disposable KVM guest (the A1 canary harness,
 A harmless local test package + local repo drive: real install/remove/upgrade
 (post-state via `pkgstate`); held/protected refusal; real dpkg-lock contention →
 `runix_apt_locked`; an interrupted transaction (SIGKILL mid-commit) →
-redeemed-no-outcome intent reconciled against dpkg ground truth; no-intent bypass
+redeemed-no-outcome intent reconciled against dpkg ground truth; a **failed
+maintainer script** (a local package whose `postinst` deliberately exits
+non-zero while its dependencies stay satisfied) → the post-effect ground-truth
+scan detects the half-configured package (`PkgIterator::State() != NeedsNothing`,
+which `BrokenCount` alone would miss) → `runix_dpkg_broken`; no-intent bypass
 (direct `pkexec`, no/replayed/mismatched receipt) → `runix_no_intent`; entrypoint
 isolation (update cannot install/remove); plan drift → `receipt_mismatch`, no
 commit; non-interactive machine path never prompts. Mirrors the contract's
