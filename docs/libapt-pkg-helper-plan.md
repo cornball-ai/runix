@@ -226,7 +226,13 @@ disagree.
 The four verbs' mechanisms differ; a single generic resolve→`DoInstall` does not
 describe all of them, and they take different locks. Each holds its lock
 continuously across resolve/enforce/digest/redeem/commit — no
-simulate-then-execute, no dropped lock.
+simulate-then-execute, no dropped lock — **except B (update)**, whose lists lock
+is owned by `ListUpdate`/`pkgAcquire` itself and cannot be held across the
+digest→redeem→refresh span; there plan identity is preserved by the retained
+`pkgSourceList`, not a held lock (§4B). A and D additionally release the *inner*
+dpkg database lock for the `dpkg` run while holding the outer frontend lock
+throughout (`UnLockInner`/`LockInner`), which is how dpkg runs without dropping
+serialization against other apt frontends.
 
 **A. Package transactions** (`install`, `remove`, `purge`, `upgrade`,
 `dist_upgrade`):
@@ -246,23 +252,42 @@ simulate-then-execute, no dropped lock.
    `pkgPackageManager::DoInstall`, lock still held.
 8. post-commit broken/half-configured check → `runix_dpkg_broken`; release lock.
 
-**B. update** (list refresh): **no** dep resolve, **no** `DoInstall`. Takes the
-**lists lock**, `pkgAcquire` refreshes indexes into `/var/lib/apt/lists`,
-rebuilds the cache. The digest is the source-set descriptor (uri/suite/
-components/options), not a package plan; redeem still applies. No dpkg
-invocation, so no broken-state check.
+**B. update** (list refresh): **no** dep resolve, **no** `DoInstall`.
+`ListUpdate`/`pkgAcquire` refreshes indexes into `/var/lib/apt/lists`, rebuilding
+the cache, and **owns the lists lock itself**. So B is the exception to the
+continuous-lock rule: the helper does a **non-blocking preflight probe** of the
+lists lock (contention → `runix_apt_locked`, retryable), releases it, and
+`ListUpdate` re-acquires it — a small preflight race in which a lock grabbed in
+the gap degrades to a refresh failure, never a false success. Plan identity is
+held not by a lock but by the **retained `pkgSourceList`**: the exact source set
+that was digested is the set `ListUpdate` refreshes. The digest is the source-set
+descriptor (uri/suite/components/options), not a package plan; redeem still
+applies. **Success requires a clean refresh** — `APT::Update::Error-Mode=any`, so
+any failed source fails the whole refresh (a partial fetch leaving stale-but-
+readable indexes is not success); the ground truth is that result plus a fresh
+cache re-opening over the rebuilt indexes. v1 refreshes the whole source list (a
+nonempty subset resource is refused). No dpkg invocation, so no broken-state check.
 
-**C. hold / unhold**: writes the dpkg **selection state** (hold ↔ install); no
-`pkgAcquire`, no `DoInstall`. Takes the dpkg admin/database lock, not a full
-transaction. The digest is the hold descriptor (package/from_state/to_state).
+**C. hold / unhold**: writes the dpkg **selection state** (hold ↔ install) with
+`dpkg --set-selections`; no `pkgAcquire`, no `DoInstall`. Holds the apt frontend
+lock continuously and releases only the **inner** dpkg database lock for the brief
+write (`UnLockInner`/`LockInner`), so no other apt frontend interleaves. The digest
+is the hold descriptor (package/from_state/to_state); a target whose current
+selection is neither `install` nor `hold` is refused. A selection write runs no
+maintainer scripts, so no broken-state check — the ground truth is the selection
+read back from a fresh cache.
 
-**D. configure** (`dpkg --configure -a`): runs the pending-config pass; **no**
-`pkgAcquire`, **no** resolver. Takes the dpkg frontend lock. The digest is the
-configure descriptor over the pending-config set. **Ownership still applies**:
-the pending set is not selectable, but configuring an `r-*` package runs its
-maintainer scripts — a mutation of a rapt-owned package — so a rapt-owned member
-is `runix_package_not_owned` **before** the receipt is spent. Broken-state check
-applies.
+**D. configure** (`dpkg --configure --pending`): runs the pending-config pass;
+**no** `pkgAcquire`, **no** resolver. Holds the frontend lock continuously and
+releases the **inner** dpkg database lock for the `dpkg` run (as A does inside
+`DoInstall`). The digest is the configure descriptor over the pending-config set
+`{unpacked, half-configured, triggers-awaited, triggers-pending}`; a
+`half-installed` package (an interrupted unpack `--configure` cannot repair) is
+**not** a configure target — it is refused as `runix_dpkg_broken` **before** the
+receipt is spent. **Ownership still applies**: the pending set is not selectable,
+but configuring an `r-*` package runs its maintainer scripts — a mutation of a
+rapt-owned package — so a rapt-owned member is `runix_package_not_owned` **before**
+the receipt is spent. Post-commit broken-state check applies.
 
 Exact libapt symbols for each lock/resolve/commit path are confirmed at step 0,
 before privileged code.
