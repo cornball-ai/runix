@@ -183,8 +183,21 @@ pinned — not left to "hash the plan":
     inside the value (space is not a separator), so `architectures` is the source's
     sorted arch set joined by single spaces (`amd64 arm64`); `trusted` is the
     explicit `[trusted=yes|no]` override that bypasses signature checks, not
-    computed trust. Keys outside the set are excluded from the digest, and values
-    obey the delimiter rule above. **Boundary:** this digest proves the *configured
+    computed trust. **`signed-by` normalization:** the value is either a keyring
+    path or fingerprint (field-safe, digested verbatim) or an inline armored public
+    key, whose multi-line `-----BEGIN PGP PUBLIC KEY BLOCK----- … -----END PGP
+    PUBLIC KEY BLOCK-----` block carries `=` and newlines and so cannot be digested
+    directly. Only `libapt-pkg`'s valid inline armored-key form is normalized, to
+    the token `inline-sha256:<64 lowercase hex>` — the SHA-256 of the exact key
+    bytes `libapt-pkg` returns after its own parsing — binding the source's
+    signing-key identity while staying inside the field grammar. Every other value
+    passes through unchanged; one that still violates the delimiter rule stays a
+    fail-closed refusal (arbitrary reserved-byte values are never hashed away). The
+    unprivileged preview and the atomic helper resolve apply this identical
+    normalization, so a path/fingerprint source keeps its exact prior bytes and
+    hash and only previously-uncanonicalisable inline-key sources become
+    digestible. Keys outside the set are excluded from the digest, and values obey
+    the delimiter rule above. **Boundary:** this digest proves the *configured
     source set*, not the remote content later fetched from those sources — remote
     payloads are outside the receipt's scope, and tests and messaging must say so.
 - **Golden vectors** for each verb (including empty and single-record cases) are
