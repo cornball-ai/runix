@@ -63,7 +63,10 @@ build_pkg canary-protected 1.0 required
 build_pkg r-cornball-canary 1.0
 
 log "index the local repo (flat, trusted, file://) and prime apt"
-( cd "$REPO" && dpkg-scanpackages . /dev/null > Packages 2>/dev/null && gzip -9c Packages > Packages.gz )
+# --multiversion so BOTH canary-benign 1.0 and 1.1 are indexed (the default keeps only
+# the newest and drops 1.0, which broke the G5 1.0->1.1 upgrade). stderr is NOT hidden,
+# so any "ignoring lower version" or malformed-package warning lands in the evidence log.
+( cd "$REPO" && dpkg-scanpackages --multiversion . /dev/null > Packages && gzip -9c Packages > Packages.gz )
 sudo tee /etc/apt/sources.list.d/canary-repo.sources >/dev/null <<EOF
 Types: deb
 URIs: file://$REPO
@@ -72,6 +75,16 @@ Trusted: yes
 Enabled: yes
 EOF
 sudo apt-get update -qq
+# Prove the refreshed index exposes EXACTLY canary-benign 1.0 and 1.1: a scanpackages
+# that silently dropped the older version is precisely the fixture failure G5 exists to
+# exercise, so abort here rather than let it surface later as an unexplained empty
+# version. apt-cache madison lists every candidate version the index offers.
+CBVERS=$(LC_ALL=C apt-cache madison canary-benign 2>/dev/null | awk '{print $3}' | sort -u | tr '\n' ' ' | sed 's/ *$//' || true)
+if [ "$CBVERS" != "1.0 1.1" ]; then
+    echo "apt-fixtures: FATAL: canary-benign index must expose exactly 1.0 and 1.1 (got '$CBVERS')" >&2
+    exit 1
+fi
+echo "  canary-benign index: $CBVERS (both versions exposed)"
 # canary-protected and r-cornball-canary are installed (via plain apt) so the
 # protected-removal and ownership refusal gates have present targets.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y canary-protected r-cornball-canary >/dev/null
