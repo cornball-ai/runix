@@ -32,6 +32,12 @@ if [ -e "$TEMPRULE" ]; then
     echo "REFUSING: a stale temp polkit rule exists ($TEMPRULE); remove it first" >&2
     exit 1
 fi
+# Refuse a stale G5 pin file too: left behind it would suppress unrelated upgrades
+# system-wide and mask what a whole-system upgrade actually does.
+if [ -e "$PIN" ]; then
+    echo "REFUSING: a stale G5 pin file exists ($PIN); remove it first" >&2
+    exit 1
+fi
 
 cleanup() {
     [ -n "$LOCKPID" ] && { kill "$LOCKPID" 2>/dev/null; wait "$LOCKPID" 2>/dev/null; }
@@ -102,17 +108,45 @@ pin_others() {
         [ -n "$ver" ] || continue
         printf 'Package: %s\nPin: version %s\nPin-Priority: 1001\n\n' "$pkg" "$ver" \
             | sudo tee -a "$PIN" >/dev/null
-    done < <(apt list --upgradable 2>/dev/null | awk -F/ 'NR>1 {print $1}')
+    done < <(LC_ALL=C apt list --upgradable 2>/dev/null | awk -F/ 'NR>1 {print $1}')
 }
 unpin_others() { sudo rm -f "$PIN"; }
-# Kill a pid and ALL its descendants deepest-first (so dpkg/postinst cannot outlive
-# the entrypoint and complete the install), as root. Used to interrupt the whole
-# helper transaction subtree (pkexec down) while leaving rab-exercise (its parent) alive.
-kill_subtree() {
-    local pid="$1" kid
-    { [ -z "$pid" ] || [ "$pid" -le 1 ]; } 2>/dev/null && return 0
-    for kid in $(pgrep -P "$pid" 2>/dev/null); do kill_subtree "$kid"; done
-    sudo kill -9 "$pid" 2>/dev/null || true
+# G-INT interruption primitives. The privileged committer is located by scanning
+# /proc/<pid>/exe directly (NOT pgrep -f: the pkexec client shares the cmdline but
+# its exe is /usr/bin/pkexec, so a cmdline match would falsely include it). Its whole
+# descendant tree is captured as (pid,starttime) identities before killing, killed
+# deepest-first by identity (robust to a reparented dpkg/postinst), then every
+# captured identity is verified gone.
+starttime() { # field 22 of /proc/<pid>/stat, robust to spaces/parens in comm
+    local s
+    s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    s=${s##*') '}
+    [ -n "$s" ] && awk '{print $20}' <<<"$s"
+}
+find_root_helpers() { # root-owned pids whose exe IS the install entrypoint
+    local d pid u exe
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        u=$(awk '/^Uid:/{print $2; exit}' "$d/status" 2>/dev/null) || continue
+        [ "$u" = 0 ] || continue
+        exe=$(sudo readlink -f "$d/exe" 2>/dev/null) || continue
+        [ "$exe" = "$LIBX/runix-apt-install" ] && echo "$pid"
+    done
+}
+collect_tree() { # append (pid,starttime) for pid and every descendant (pre-order)
+    local pid=$1 st kid
+    st=$(starttime "$pid") || return 0
+    [ -n "$st" ] || return 0
+    CAPPIDS+=("$pid"); CAPSTART+=("$st")
+    for kid in $(pgrep -P "$pid" 2>/dev/null); do collect_tree "$kid"; done
+}
+all_gone() { # true iff no captured identity is still alive (same pid AND starttime)
+    local i now
+    for i in "${!CAPPIDS[@]}"; do
+        now=$(starttime "${CAPPIDS[$i]}")
+        [ -n "$now" ] && [ "$now" = "${CAPSTART[$i]}" ] && return 1
+    done
+    return 0
 }
 direct_pkexec() { # verb-path json -> sets DST, DEF, DDT
     local out
@@ -184,32 +218,42 @@ ungrant
 
 echo "########## G5: whole-system upgrade (temp-grant) 1.0 -> 1.1 ##########"
 grant upgrade
-# Setup + PROVE it: install canary-benign 1.0 and assert it BEFORE planning, so a
-# silently failed fixture install surfaces here (as the precondition) rather than
-# later as an unexplained empty post-upgrade version.
+# Setup + PROVE it BEFORE planning: a silently failed fixture install surfaces here
+# (as the precondition), not later as an unexplained empty post-upgrade version.
 sudo apt-get install -y --allow-downgrades canary-benign=1.0 >/dev/null 2>&1
-[ "$(dpkg_ver canary-benign)" = 1.0 ] \
-    && ok "G5 setup: canary-benign == 1.0 before upgrade" \
+SETUP_OK=0; [ "$(dpkg_ver canary-benign)" = 1.0 ] && SETUP_OK=1
+[ "$SETUP_OK" -eq 1 ] && ok "G5 setup: canary-benign == 1.0 before upgrade" \
     || no "G5 setup" "ver=$(dpkg_ver canary-benign) (expected 1.0)"
 # Isolate the whole-system upgrade to the canary transition: pin every OTHER
 # upgradable package to its installed version (removed below and in the trap).
 pin_others
-# Assert the SIMULATED whole-system upgrade (same FORBID_REMOVE semantics as the
-# effector's apt.upgrade) is EXACTLY canary-benign 1.0->1.1 and nothing else.
-SIM=$(apt-get -s upgrade --with-new-pkgs 2>/dev/null | grep -E '^(Inst|Remv|Purg) ')
+# The SIMULATED whole-system upgrade (same FORBID_REMOVE semantics as the effector's
+# apt.upgrade, parsed under LC_ALL=C) must be EXACTLY canary-benign 1.0->1.1, nothing else.
+SIM=$(LC_ALL=C apt-get -s upgrade --with-new-pkgs 2>/dev/null | grep -E '^(Inst|Remv|Purg) ')
 CBLINE=$(grep -E '^Inst canary-benign \[1\.0\] \(1\.1' <<<"$SIM")
 OTHER=$(grep -vE '^Inst canary-benign ' <<<"$SIM" | grep -E '^(Inst|Remv|Purg) ')
-{ [ -n "$CBLINE" ] && [ -z "$OTHER" ]; } \
-    && ok "G5 plan: only canary-benign 1.0->1.1, no unrelated changes" \
+SIM_OK=0; { [ -n "$CBLINE" ] && [ -z "$OTHER" ]; } && SIM_OK=1
+[ "$SIM_OK" -eq 1 ] && ok "G5 plan: only canary-benign 1.0->1.1, no unrelated changes" \
     || no "G5 plan" "cb='$CBLINE' other='$(tr '\n' ';' <<<"$OTHER")'"
-# Run the real helper over the isolated transaction.
-do_plan apt.upgrade
-do_ex apt.upgrade "$PR" "$PH"
-{ [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
-    && ok "G5 upgrade status ok" || no "G5 upgrade" "status=$EXSTATUS eff=$EXEFFECT"
-[ "$(dpkg_ver canary-benign)" = 1.1 ] \
-    && ok "G5 canary-benign upgraded to 1.1 (native)" || no "G5 dpkg" "ver=$(dpkg_ver canary-benign)"
+# Run the REAL upgrade ONLY when isolation is proven, so a failed precondition or
+# simulation can never trigger the base image's unrelated upgrades. Require a clean
+# plan (PRC==0, nonempty hash) before issuing the receipt.
+if [ "$SETUP_OK" -eq 1 ] && [ "$SIM_OK" -eq 1 ]; then
+    do_plan apt.upgrade
+    if [ "${PRC:-1}" -eq 0 ] && [ -n "${PH:-}" ]; then
+        do_ex apt.upgrade "$PR" "$PH"
+        { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
+            && ok "G5 upgrade status ok" || no "G5 upgrade" "status=$EXSTATUS eff=$EXEFFECT"
+        [ "$(dpkg_ver canary-benign)" = 1.1 ] \
+            && ok "G5 canary-benign upgraded to 1.1 (native)" || no "G5 dpkg" "ver=$(dpkg_ver canary-benign)"
+    else
+        no "G5 plan-hash" "PRC=${PRC:-?} hash='${PH:-}' (no receipt issued)"
+    fi
+else
+    no "G5 upgrade" "isolation not proven (setup=$SETUP_OK sim=$SIM_OK); real upgrade skipped"
+fi
 unpin_others
+[ -e "$PIN" ] && no "G5 pins" "pin file survived removal" || ok "G5 pins removed + verified"
 ungrant
 
 echo "########## G8: hold (autonomous) then unhold (temp-grant), selection read-back ##########"
@@ -318,34 +362,38 @@ BGPID=$!
 # the configure (postinst) is mid-run — the real post-redeem interruption window.
 MARKED=0
 for _ in $(seq 1 120); do [ -e /run/canary-slow.marker ] && { MARKED=1; break; }; sleep 0.5; done
-# The pkexec-spawned privileged helper is reparented under polkitd — it is NOT a
-# child of the pkexec client, so killing the client leaves dpkg running to
-# completion (the transaction finishes and records outcome=ok). Locate the EXACT
-# privileged process by /proc/<pid>/exe and require exactly one root-owned match,
-# then kill ITS descendant tree deepest-first (dpkg -> postinst -> sleep) and the
-# helper itself — never the client. rab-exercise (the parent) stays alive.
-helpers_now() { # print each root-owned pid whose exe is the install entrypoint
-    local p exe u
-    for p in $(pgrep -f "$LIBX/runix-apt-install" 2>/dev/null); do
-        exe=$(sudo readlink -f "/proc/$p/exe" 2>/dev/null)
-        u=$(sudo awk '/^Uid:/{print $2; exit}' "/proc/$p/status" 2>/dev/null)
-        [ "$exe" = "$LIBX/runix-apt-install" ] && [ "$u" = 0 ] && echo "$p"
-    done
-}
-mapfile -t HELPERS < <(helpers_now)
-[ "${#HELPERS[@]}" -eq 1 ] \
-    && ok "G-INT one root helper located (pid ${HELPERS[0]}, /proc/exe=$LIBX/runix-apt-install)" \
-    || no "G-INT locate" "expected exactly 1 root-owned helper, found ${#HELPERS[@]}"
-PKPID=${HELPERS[0]:-}
-[ -n "$PKPID" ] && kill_subtree "$PKPID"
-# Verify the ENTIRE transaction subtree is gone before evaluating the outcome.
-SUBGONE=0
-for _ in $(seq 1 40); do
-    [ -z "$(helpers_now)" ] && { SUBGONE=1; break; }
-    sleep 0.25
-done
-[ "$SUBGONE" -eq 1 ] && ok "G-INT transaction subtree gone before evaluation" \
-    || no "G-INT subtree" "a root-owned helper survived the kill"
+# The pkexec-spawned committer is reparented under polkitd, NOT a child of the pkexec
+# client (killing the client leaves dpkg running to completion). Do not touch anything
+# until the postinst marker exists AND exactly one root-owned process whose
+# /proc/<pid>/exe IS the entrypoint is identified. Capture its complete descendant tree
+# as (pid,starttime) identities, kill deepest-first by identity (so a reparented
+# dpkg/postinst is still killed), and require EVERY captured identity gone, not just the
+# helper. On any sync/identity failure, fail without pretending an interruption occurred:
+# do not kill, and let the honest outcome assertions below register it.
+mapfile -t HELPERS < <(find_root_helpers)
+CAPPIDS=(); CAPSTART=()
+if [ "$MARKED" -eq 1 ] && [ "${#HELPERS[@]}" -eq 1 ]; then
+    ok "G-INT one root helper located (pid ${HELPERS[0]})"
+    collect_tree "${HELPERS[0]}"
+    if [ "${#CAPPIDS[@]}" -ge 2 ]; then
+        ok "G-INT captured transaction tree (${#CAPPIDS[@]} procs: helper + dpkg/postinst)"
+        # Kill the captured identities deepest-first (reverse of pre-order capture),
+        # each re-verified by (pid,starttime) so a reused pid is never killed.
+        for (( i=${#CAPPIDS[@]}-1; i>=0; i-- )); do
+            [ "$(starttime "${CAPPIDS[$i]}")" = "${CAPSTART[$i]}" ] \
+                && sudo kill -9 "${CAPPIDS[$i]}" 2>/dev/null
+        done
+        SUBGONE=0
+        for _ in $(seq 1 40); do all_gone && { SUBGONE=1; break; }; sleep 0.25; done
+        [ "$SUBGONE" -eq 1 ] \
+            && ok "G-INT whole captured tree gone (no reparented dpkg/postinst survived)" \
+            || no "G-INT subtree" "a captured (pid,starttime) survived the kill"
+    else
+        no "G-INT capture" "captured ${#CAPPIDS[@]} procs (expected helper + dpkg/postinst)"
+    fi
+else
+    no "G-INT locate" "marked=$MARKED root-helpers=${#HELPERS[@]} (need marker + exactly 1); not killing"
+fi
 wait "$BGPID" 2>/dev/null; INTRC=$?
 iline=$(grep '^RESULT ' "$INTOUT" | head -1); icid=$(field cid "$iline"); iout=$(field outcome "$iline")
 rm -f "$INTOUT"
