@@ -16,14 +16,19 @@ commit → outcome, plus polkit authorization), **not** the future `pkgops`
 integration. That is the point of the slice: freeze and prove the boundary before
 `pkgops` is built on top of it.
 
-## The two VM-only oracles (never packaged)
+## The issue-time planner and the VM-only lifecycle oracle
 
-- **`pkgexec-plan`** (pkgexec `tools/plan.cc`, root): under the held dpkg lock it
-  produces the issue-time `resource` + `plan_hash` for a verb, reusing the
-  effector's `pkgx_apt_map_txn` (transactions) and the shared `pkgx_digest_*`
-  functions, mirroring the update/hold/configure enumerations. Strict allowlist +
-  arity; a policy/ownership/digest failure exits nonzero with no plan; an empty set
-  is `status=noop`. It never redeems or commits.
+- **`runix-apt-preview`** (pkgexec, **packaged**, run unprivileged as `aptbot`): the
+  PRODUCTION planner — exactly the binary `pkgops` will call. Read-only and lockless,
+  it produces the issue-time `resource` + `plan_hash` for a verb from one strict JSON
+  request `{schema_version, verb, packages}`, reusing the effectors' shared
+  `apt_common` descriptor builders and `pkgx_digest_*`, so a matching cache yields the
+  matching hash. Nine closed statuses; exit 0 iff `ok`/`no_op`; a policy refusal
+  carries the full records + hash + offender; a `no_op` carries no hash. Successful
+  receipt redemption from this hash is the parity proof — the advisory preview matched
+  the effector's atomic locked re-resolution. Installed from the pkgexec `.deb` (on
+  PATH at `/usr/bin`); the root `pkgexec-plan` diagnostic is no longer used by the
+  gates.
 - **`rab-exercise`** (broker `tools/rab-exercise.c`, run as the principal): the
   whole lifecycle in ONE process (the outcome binding is pinned to the opener's
   full process identity). Verifies the broker peer is uid 0; `open_intent(+effect)`;
@@ -33,7 +38,9 @@ integration. That is the point of the slice: freeze and prove the boundary befor
   receipt to prove single-use at the boundary. Any failure after the durable intent
   leaves it open for reconciliation.
 
-Both are compiled+linked in CI as the mutation-path proof; their runtime is VM-only.
+`runix-apt-preview` is built + run in CI (a link gate plus an emit smoke) and ships in
+the `.deb`; `rab-exercise` is compiled+linked in CI as the mutation-path proof and its
+runtime is VM-only.
 
 ## In-guest fixtures
 
@@ -48,6 +55,11 @@ Both are compiled+linked in CI as the mutation-path proof; their runtime is VM-o
   refusal — the contracted protected set, not broadened to `important`);
   `r-cornball-canary` (matches rapt's `^r-[a-z]+-[a-z0-9.]+$` → the ownership
   `package_not_owned` refusal).
+- A second, GPG-signed flat repo (`/srv/canary-signed`) whose deb822 source carries an
+  **inline armored public key** (not a keyring path), staged out of `sources.list.d`.
+  The `signed-by` normalization gate (G-INLINE) adds it, proves the preview maps the
+  inline key to `inline-sha256:<hex>` (never leaking armor) and that the hash redeems
+  through the locked update effector, then removes it.
 - A `fcntl-lock` helper: apt's lock is an fcntl record lock, not a flock, so the
   contention gate uses a small fcntl (F_SETLK) write-lock holder that genuinely
   excludes the helper's `GetLock`.
@@ -82,6 +94,9 @@ Both are compiled+linked in CI as the mutation-path proof; their runtime is VM-o
 | G14 plan drift | `no_intent`, `detail=receipt_mismatch` |
 | G15 entrypoint isolation | a package arg to `update` is **rejected** (`internal`, no effect); nothing installed |
 | G-INT interrupted transaction | SIGKILL mid-commit → `outcome=open`; redeemed-no-outcome intent + dpkg ground truth |
+| G-INLINE update, inline-Signed-By source | preview record `signed-by=inline-sha256:<64hex>`, no armored key in evidence; that exact preview hash redeems through the locked update effector (`ok`, `effect_issued:true`) |
+| G-PREV-OWN preview refusal (issuer-side) | `runix-apt-preview` (aptbot) returns strict `package_not_owned` + nonzero exit; **no** `rab-exercise`; audit sink byte-identical (no intent opened) |
+| G-PREV-NOOP preview no-op (issuer-side) | `runix-apt-preview` (aptbot) returns strict `no_op` + exit 0; **no** `rab-exercise`; audit sink byte-identical (no intent opened) |
 
 HELD is documented as unit-tested only: apt's own resolver honors holds, so a
 resolved transaction that changes a held package is impractical to produce through

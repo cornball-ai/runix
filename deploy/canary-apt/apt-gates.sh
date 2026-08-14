@@ -1,10 +1,12 @@
 #!/bin/bash
 # §7 apt-mutation acceptance gates (libapt-pkg-helper-plan.md §7) inside the guest.
-# Run as `ubuntu`. Drives the NATIVE helper boundary via the two VM-only oracles:
-#   pkgexec-plan  (root): the issue-time digest source (resource + plan_hash)
-#   rab-exercise  (aptbot): the one-process open->helper->outcome lifecycle
+# Run as `ubuntu`. Drives the NATIVE helper boundary via:
+#   runix-apt-preview (aptbot): the PRODUCTION planner — the unprivileged, read-only
+#                     issue-time digest source (resource + plan_hash), exactly the
+#                     binary pkgops will call. NOT the root pkgexec-plan diagnostic.
+#   rab-exercise      (aptbot): the one-process open->helper->outcome lifecycle
 # Native observations only (dpkg-query, the audit sink); no R stack, so this proves
-# the native helper boundary, not the future pkgops integration.
+# the native helper boundary with the production planner's hash driving redemption.
 #
 # Autonomous verbs (update/hold) run as aptbot directly. Every OTHER verb — unhold
 # included — is gated, so it follows codex's rule: the default-denial matrix is
@@ -73,12 +75,22 @@ ungrant() {
 }
 
 field() { grep -oE "$1=[^ ]*" <<<"$2" | head -1 | cut -d= -f2-; }
-do_plan() { # verb [pkgs...] -> PH, PR, PRC
-    local out
-    out=$(sudo pkgexec-plan "$@" 2>/dev/null)
+# do_plan: the issue-time resource + plan_hash from the PRODUCTION planner
+# runix-apt-preview, run UNPRIVILEGED as aptbot (the actor that opens the intent),
+# exactly as pkgops will — NOT the root pkgexec-plan diagnostic. One strict JSON
+# request in, one strict JSON object out. Sets PPREV (the full JSON, for detailed
+# assertions), PST (.status), PH (.plan_hash, "" when JSON null e.g. a no_op), PR
+# (.resource, "" when null), and PRC (planner exit: 0 iff ok/no_op). The usable-plan
+# test the gates use stays `PRC==0 && -n PH` (ok carries a hash; no_op does not).
+do_plan() { # verb [pkgs...]
+    local verb=$1; shift
+    PPREV=$(jq -cn --arg v "$verb" \
+                '{schema_version:1,verb:$v,packages:$ARGS.positional}' --args "$@" \
+            | sudo -u aptbot runix-apt-preview 2>/dev/null)
     PRC=$?
-    PH=$(grep -oE '^plan_hash=.*' <<<"$out" | cut -d= -f2)
-    PR=$(grep -oE '^resource=.*' <<<"$out" | cut -d= -f2-)
+    PST=$(jq -r '.status // ""' <<<"$PPREV" 2>/dev/null)
+    PH=$(jq -r '.plan_hash // ""' <<<"$PPREV" 2>/dev/null)
+    PR=$(jq -r '.resource // ""' <<<"$PPREV" 2>/dev/null)
 }
 do_ex() { # [--replay] <verb> <resource> <hash> [pkgs...] -> EXRC,EXSTATUS,EXDETAIL,EXEFFECT,EXOUTCOME,EXCID,EXREPLAY
     local args=()
@@ -434,6 +446,69 @@ ungrant
 echo "  [cleanup] removing the deliberately-broken canary-badpost"
 sudo dpkg --remove --force-remove-reinstreq canary-badpost >/dev/null 2>&1 || true
 sudo dpkg --purge canary-badpost >/dev/null 2>&1 || true
+
+echo "########## G-INLINE: apt.update over an inline-Signed-By source -> inline-sha256, redeems ##########"
+# The signed inline-key repo is staged out of sources.list.d by the fixtures; add it
+# only for this gate (like the drift source), so the other update gates keep their
+# hash. apt.update must fetch AND verify it (signed), the preview must show the key
+# as inline-sha256:<hex> and never leak armor, and that exact hash must redeem.
+sudo cp /srv/canary-inline.sources /etc/apt/sources.list.d/canary-inline.sources
+sudo apt-get update -qq
+do_plan apt.update
+ISB=$(jq -r '.records[]|select(.uri|test("canary-signed"))|.options."signed-by" // empty' <<<"$PPREV")
+[[ "$ISB" =~ ^inline-sha256:[0-9a-f]{64}$ ]] \
+    && ok "G-INLINE preview record signed-by=$ISB" \
+    || no "G-INLINE inline-sha256" "signed-by='$ISB'"
+grep -q "BEGIN PGP" <<<"$PPREV" \
+    && no "G-INLINE armor leak" "armored key material in preview stdout" \
+    || ok "G-INLINE no armored key material in preview output"
+if [ "$PRC" = 0 ] && [ -n "$PH" ]; then
+    do_ex apt.update "" "$PH"
+    { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
+        && ok "G-INLINE preview hash redeems through the locked update effector" \
+        || no "G-INLINE redeem" "status=$EXSTATUS eff=$EXEFFECT"
+else
+    no "G-INLINE plan" "PRC=$PRC hash='${PH:0:12}' (no receipt issued)"
+fi
+sudo rm -f /etc/apt/sources.list.d/canary-inline.sources
+sudo apt-get update -qq
+
+echo "########## G-PREV-OWN: preview refuses rapt-owned (package_not_owned), opens NO intent ##########"
+# The FUTURE issuer's behavior: a preview refusal stops before open_intent. Prove it
+# natively — runix-apt-preview as aptbot refuses, we never call rab-exercise, and the
+# audit sink is byte-identical across the preview (no intent, no record). This is
+# additive to G-OWN, which still proves the privileged boundary's own defense.
+SB0=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+do_plan apt.hold r-cornball-canary
+SB1=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+POWN=$(jq -e '.status=="package_not_owned" and .verb=="apt.hold"
+    and .packages==["r-cornball-canary"] and .plan_schema==1
+    and .resource=="r-cornball-canary" and (.plan_hash|test("^[0-9a-f]{64}$"))
+    and (.records|length)>0 and .detail=="r-cornball-canary"' <<<"$PPREV" >/dev/null \
+    && echo 1 || echo 0)
+{ [ "$POWN" = 1 ] && [ "$PST" = package_not_owned ] && [ "$PRC" -ne 0 ]; } \
+    && ok "G-PREV-OWN strict package_not_owned + nonzero exit (no rab-exercise)" \
+    || no "G-PREV-OWN response" "status=$PST rc=$PRC strict=$POWN"
+{ [ -n "$SB0" ] && [ "$SB0" = "$SB1" ]; } \
+    && ok "G-PREV-OWN audit sink byte-identical (no intent opened)" \
+    || no "G-PREV-OWN sink" "sink '$SB0' -> '$SB1'"
+
+echo "########## G-PREV-NOOP: preview no_op (already satisfied), opens NO intent ##########"
+# canary-protected is installed at its only version -> an empty transaction -> no_op,
+# distinct from a refusal. The issuer opens no intent; prove the sink is untouched.
+SB0=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+do_plan apt.install canary-protected
+SB1=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+PNOOP=$(jq -e '.status=="no_op" and .verb=="apt.install"
+    and .packages==["canary-protected"] and .plan_schema==null and .plan_hash==null
+    and (.records|length)==0 and .resource=="canary-protected" and .detail==null' <<<"$PPREV" >/dev/null \
+    && echo 1 || echo 0)
+{ [ "$PNOOP" = 1 ] && [ "$PST" = no_op ] && [ "$PRC" -eq 0 ]; } \
+    && ok "G-PREV-NOOP strict no_op + exit 0 (no rab-exercise)" \
+    || no "G-PREV-NOOP response" "status=$PST rc=$PRC strict=$PNOOP"
+{ [ -n "$SB0" ] && [ "$SB0" = "$SB1" ]; } \
+    && ok "G-PREV-NOOP audit sink byte-identical (no intent opened)" \
+    || no "G-PREV-NOOP sink" "sink '$SB0' -> '$SB1'"
 
 echo
 echo "==== §7 apt-mutation gates: $pass passed, $fail failed ===="
