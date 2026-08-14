@@ -30,7 +30,11 @@ guest 'echo guest-ok; . /etc/os-release; echo "$PRETTY_NAME"'
 
 echo "#### stage into a UNIQUE owned guest directory, verify checksums ####"
 GDIR=$(guest 'mktemp -d "$HOME/canary-apt.XXXXXX"')
-gscp "$STAGEDIR"/* ubuntu@"$IP":"$GDIR"/
+# Stage ONLY the checksummed artifacts, array-safe (no glob, no command-substitution
+# word-splitting): the per-run evidence directory and any run.log/pid live under
+# $STAGEDIR too, and a glob would try to scp the directory (fatal without -r).
+mapfile -t ARTS < <(awk '{print $2}' "$STAGEDIR/SHA256SUMS")
+( cd "$STAGEDIR" && gscp SHA256SUMS "${ARTS[@]}" ubuntu@"$IP":"$GDIR"/ )
 guest "cd $GDIR && sha256sum -c SHA256SUMS" | tee "$EVID/00-checksums.log"
 guest "cd $GDIR && tar xzf runix-audit-broker.tar.gz && tar xzf pkgexec.tar.gz"
 
