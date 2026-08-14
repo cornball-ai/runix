@@ -289,11 +289,16 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    left as the narrow r2u backend. **First unit done (2026-08-12):** the audit
    broker's effect-receipt capability (gap 8) — the durable execution authority
    the pkexec helper redeems before a dpkg commit — is built and merged
-   (runix-audit-broker #3, runix #55). Remaining: the `libapt-pkg`/pkexec helper
-   that redeems a receipt before committing, then `pkgops`. Verification ladder:
-   contract → helper/API → fixture tests → a minimal destructive **disposable-VM**
-   gate (dpkg locking, maintainer scripts, interrupted transactions, conffiles,
-   and partial states cannot be faked in fixtures). **← current arc.**
+   (runix-audit-broker #3, runix #55). **Second unit done (2026-08-14):** the
+   `libapt-pkg`/pkexec helper (`cornball-ai/pkgexec`: nine per-verb root effectors
+   that redeem a receipt before the dpkg commit) is built, merged, and proven on the
+   destructive disposable-VM gate: 23/23 polkit matrix and 37/37 §7 acceptance gates
+   (pkgexec #3, runix #67, with the VM-only lifecycle driver in runix-audit-broker
+   #4). The verification ladder (contract → helper/API → fixture tests → the
+   disposable-VM gate: dpkg locking, maintainer scripts, interrupted transactions,
+   package ownership) passed. **Remaining: `pkgops`**, the unprivileged R-facing
+   layer that previews, obtains the receipt, invokes pkgexec, verifies native state,
+   and closes the audit outcome. **← current arc.**
 8. apt mutation implementation; then gaps 4–6 incrementally.
 
 ## Validation: the workflow that must be materially better
