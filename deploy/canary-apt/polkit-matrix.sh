@@ -30,12 +30,16 @@ expect_allow() { # user action label
     authz "$1" "$2"; local rc=$?
     [ "$rc" -eq 0 ] && ok "$3 allowed (rc=0)" || no "$3" "rc=$rc, expected authorized"
 }
-expect_deny() { # user action label — a real denial is rc 1 or 3; rc 2 is a tooling error
+expect_deny() { # user action label
+    # A machine-mode refusal is rc 1 (denied) or rc 2 (authorization unavailable:
+    # no agent / interaction disabled). rc 3 (an interaction was dismissed), rc
+    # 126/127, and a timeout are FAILURES, not valid prompt-free refusals.
     authz "$1" "$2"; local rc=$?
     case "$rc" in
-        1 | 3) ok "$3 denied (rc=$rc)" ;;
+        1 | 2) ok "$3 refused prompt-free (rc=$rc)" ;;
         0) no "$3" "authorized (rc=0)" ;;
-        *) no "$3" "tooling error rc=$rc (not a valid denial)" ;;
+        3) no "$3" "interaction dismissed (rc=3)" ;;
+        *) no "$3" "tooling failure rc=$rc" ;;
     esac
 }
 
@@ -56,15 +60,18 @@ echo "## PROOF 4: machine mode never prompts (a timeout is a FAILURE, not a deni
 timeout 15 sudo -u aptbot "$PKQ" "$ACT.install" >/dev/null 2>&1; rc=$?
 case "$rc" in
     124) no "P4 pkcheck gated" "TIMEOUT (prompted/hung)" ;;
-    1 | 3) ok "P4 pkcheck gated denied promptly (rc=$rc)" ;;
+    1 | 2) ok "P4 pkcheck gated refused prompt-free (rc=$rc)" ;;
     0) no "P4 pkcheck gated" "authorized" ;;
-    *) no "P4 pkcheck gated" "tooling error rc=$rc" ;;
+    3) no "P4 pkcheck gated" "interaction dismissed (rc=3)" ;;
+    *) no "P4 pkcheck gated" "tooling failure rc=$rc" ;;
 esac
+# pkexec's prompt-free refusal is observed as rc 127 (no agent / not authorized).
 timeout 15 sudo -u aptbot pkexec "$LIBX/runix-apt-install" </dev/null >/dev/null 2>&1; rc=$?
 case "$rc" in
     124) no "P4 pkexec gated" "TIMEOUT (prompted/hung)" ;;
+    126 | 127) ok "P4 pkexec gated refused (rc=$rc), no prompt" ;;
     0) no "P4 pkexec gated" "ran a gated verb" ;;
-    *) ok "P4 pkexec gated denied (rc=$rc), no prompt" ;;
+    *) no "P4 pkexec gated" "unexpected rc=$rc" ;;
 esac
 
 echo "## PROOF 5: nine entrypoints — regular non-symlink files, root-owned, unwritable, distinct inodes"

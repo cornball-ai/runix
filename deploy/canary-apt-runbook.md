@@ -44,9 +44,10 @@ Both are compiled+linked in CI as the mutation-path proof; their runtime is VM-o
   `canary-benign` (1.0/1.1: install/remove/upgrade/hold); `canary-badpost`
   (postinst exits 1, deps satisfied → half-configured → `dpkg_broken`);
   `canary-slow` (postinst sleeps → a catchable SIGKILL window for the interrupted
-  transaction); `canary-protected` (`Priority: important` → protected-removal
-  refusal); `r-cornball-canary` (matches rapt's `^r-[a-z]+-[a-z0-9.]+$` → the
-  ownership `package_not_owned` refusal).
+  transaction); `canary-protected` (`Priority: required` → protected-removal
+  refusal — the contracted protected set, not broadened to `important`);
+  `r-cornball-canary` (matches rapt's `^r-[a-z]+-[a-z0-9.]+$` → the ownership
+  `package_not_owned` refusal).
 - A `fcntl-lock` helper: apt's lock is an fcntl record lock, not a flock, so the
   contention gate uses a small fcntl (F_SETLK) write-lock holder that genuinely
   excludes the helper's `GetLock`.

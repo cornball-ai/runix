@@ -9,7 +9,7 @@
 #                                     half-configured -> dpkg_broken gate
 #       canary-slow       1.0         postinst sleeps -> a catchable window for the
 #                                     interrupted-transaction (SIGKILL mid-commit) gate
-#       canary-protected  1.0         Priority: important -> protected-removal refusal
+#       canary-protected  1.0         Priority: required -> protected-removal refusal
 #       r-cornball-canary 1.0         matches rapt's ^r-[a-z]+-[a-z0-9.]+$ ->
 #                                     ownership (package_not_owned) refusal
 # Every package is inert (a marker file, a bounded sleep); nothing here touches a
@@ -59,7 +59,7 @@ build_pkg canary-badpost 1.0 optional \
     'echo "canary-badpost: postinst failing on purpose" >&2; exit 1'
 build_pkg canary-slow 1.0 optional \
     'touch /run/canary-slow.marker; echo "canary-slow: postinst marker set, sleeping"; sleep 30'
-build_pkg canary-protected 1.0 important
+build_pkg canary-protected 1.0 required
 build_pkg r-cornball-canary 1.0
 
 log "index the local repo (flat, trusted, file://) and prime apt"

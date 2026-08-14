@@ -99,9 +99,11 @@ kill_subtree() {
 direct_pkexec() { # verb-path json -> sets DST, DEF, DDT
     local out
     out=$(printf '%s' "$2" | sudo -u aptbot pkexec "$1" 2>/dev/null)
-    DST=$(jq -r '.status // ""' <<<"$out" 2>/dev/null)
-    DEF=$(jq -r '.effect_issued // ""' <<<"$out" 2>/dev/null)
-    DDT=$(jq -r '.detail // ""' <<<"$out" 2>/dev/null)
+    DST=$(jq -r 'if (.status|type)=="string" then .status else "" end' <<<"$out" 2>/dev/null)
+    # explicit boolean presence/type check: `.effect_issued // ""` would swallow a
+    # JSON false (jq's // treats false as empty), so false stays "false" here.
+    DEF=$(jq -r 'if (.effect_issued|type)=="boolean" then (.effect_issued|tostring) else "" end' <<<"$out" 2>/dev/null)
+    DDT=$(jq -r 'if (.detail|type)=="string" then .detail else "" end' <<<"$out" 2>/dev/null)
 }
 audit_intent_outcome() { # cid label
     sleep 1
