@@ -23,3 +23,11 @@ checked against an outside authority, not against itself. US = `0x1f`, RS =
 When the R encoder exists it must reproduce every `canonical_hex` and `sha256`
 here; `vectors.json` is the single source of truth, vendored (byte-identical)
 into `cornball-ai/pkgexec` at `tests/fixtures/plan-digest/`.
+
+`update_inline_signed_by` pins the `signed-by` inline-armored-key normalization
+(`docs/broker-effect-receipt-contract.md`, "Plan digest"): an inline PGP key
+carries `=` and newlines, so it is replaced with `inline-sha256:<64 lowercase
+hex>` over the exact key bytes `libapt-pkg` returns. The record here already holds
+that token (the digest operates on the normalized value); its `_note` records the
+fixed key K and its SHA-256, so the token is reproducible. `_note` is
+documentation only — encoders read `verb`/`records`/`canonical_hex`/`sha256`.
