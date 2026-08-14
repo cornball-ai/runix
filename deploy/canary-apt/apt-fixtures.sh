@@ -131,20 +131,21 @@ GNUPGHOME="$GH" gpg --batch --yes -abs -o "$SIGNREPO/Release.gpg" "$SIGNREPO/Rel
     GNUPGHOME="$GH" gpg --batch --armor --export canary-inline@localhost \
         | sed -e 's/^[[:space:]]*$/./' -e 's/^/ /'
 } | sudo tee /srv/canary-inline.sources >/dev/null
-# Prove the staged source refreshes AND verifies before the gate depends on it: a
-# broken signature here is exactly the fixture failure G-INLINE would otherwise
-# surface as an unexplained update failure, so abort now.
-sudo cp /srv/canary-inline.sources /etc/apt/sources.list.d/canary-inline.sources
-if sudo apt-get update -o Dir::Etc::sourcelist=/dev/null \
-       -o Dir::Etc::sourceparts=/etc/apt/sources.list.d/canary-inline.sources \
+# Prove the staged source refreshes AND verifies via ITS OWN inline key before the
+# gate depends on it (a broken signature here is exactly the fixture failure G-INLINE
+# would otherwise surface as an unexplained update failure, so abort now). Isolate it
+# in a temp sourceparts DIR with the system keyrings excluded, so success proves the
+# inline Signed-By key alone verified it. Nothing is left in the system sources.list.d;
+# the G-INLINE gate adds it there for its own run.
+VDIR="$BUILD/inline-verify"; mkdir -p "$VDIR"
+cp /srv/canary-inline.sources "$VDIR/canary-inline.sources"
+if sudo apt-get update -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts="$VDIR" \
+       -o Dir::Etc::trusted=/dev/null -o Dir::Etc::trustedparts=/dev/null \
        -qq 2>"$BUILD/inline-update.err"; then
-    echo "  inline-key repo signed + verified (staged at /srv/canary-inline.sources)"
+    echo "  inline-key repo signed + verified via its inline key (staged at /srv/canary-inline.sources)"
 else
-    echo "apt-fixtures: FATAL: inline-key repo did not verify:" >&2
+    echo "apt-fixtures: FATAL: inline-key repo did not verify via its inline key:" >&2
     cat "$BUILD/inline-update.err" >&2
-    sudo rm -f /etc/apt/sources.list.d/canary-inline.sources
     exit 1
 fi
-sudo rm -f /etc/apt/sources.list.d/canary-inline.sources
-sudo apt-get update -qq
 echo "apt-fixtures: OK"
