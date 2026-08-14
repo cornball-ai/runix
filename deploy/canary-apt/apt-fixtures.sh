@@ -100,7 +100,11 @@ echo "  r-cornball-canary:  $(dpkg-query -W -f='${Version}' r-cornball-canary 2>
 # STAGED at /srv/canary-inline.sources (NOT in sources.list.d); the G-INLINE gate
 # copies it in and removes it, so the other update gates keep their existing hash.
 log "inline-Signed-By signed repo (signed-by normalization gate)"
-sudo apt-get install -y -qq gnupg apt-utils >/dev/null 2>&1 || true
+# No `|| true`: a failed install here must abort (set -e), not silently proceed to a
+# cryptic gpg/apt-ftparchive "command not found". Prove BOTH tools are present after.
+sudo apt-get install -y -qq gnupg apt-utils >/dev/null
+command -v gpg >/dev/null && command -v apt-ftparchive >/dev/null \
+    || { echo "apt-fixtures: FATAL: gpg/apt-ftparchive missing after install" >&2; exit 1; }
 SIGNREPO=/srv/canary-signed
 GH="$BUILD/gnupg"; mkdir -p "$GH"; chmod 700 "$GH"
 cat > "$BUILD/keyparams" <<'EOF'

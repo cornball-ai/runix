@@ -21,6 +21,7 @@ REPO=/srv/canary-repo
 TEMPRULE=/etc/polkit-1/rules.d/49-canary-apt-temp.rules
 BROKENSRC=/etc/apt/sources.list.d/canary-broken.sources
 DRIFTSRC=/etc/apt/sources.list.d/canary-drift.sources
+INLINESRC=/etc/apt/sources.list.d/canary-inline.sources
 PIN=/etc/apt/preferences.d/99-canary-g5-pin
 ZERO=0000000000000000000000000000000000000000000000000000000000000000
 LOCKPID=""
@@ -40,10 +41,17 @@ if [ -e "$PIN" ]; then
     echo "REFUSING: a stale G5 pin file exists ($PIN); remove it first" >&2
     exit 1
 fi
+# Refuse a stale inline-key source too: left in sources.list.d it joins EVERY
+# apt.update digest (an extra source in the plan), silently changing the other update
+# gates' hashes and masking exactly what G-INLINE is meant to prove.
+if [ -e "$INLINESRC" ]; then
+    echo "REFUSING: a stale inline-key source exists ($INLINESRC); remove it first" >&2
+    exit 1
+fi
 
 cleanup() {
     [ -n "$LOCKPID" ] && { kill "$LOCKPID" 2>/dev/null; wait "$LOCKPID" 2>/dev/null; }
-    sudo rm -f "$BROKENSRC" "$DRIFTSRC" "$PIN" 2>/dev/null || true
+    sudo rm -f "$BROKENSRC" "$DRIFTSRC" "$INLINESRC" "$PIN" 2>/dev/null || true
     if [ -e "$TEMPRULE" ]; then
         sudo rm -f "$TEMPRULE"; sudo systemctl restart polkit 2>/dev/null; sleep 1
     fi
@@ -75,13 +83,49 @@ ungrant() {
 }
 
 field() { grep -oE "$1=[^ ]*" <<<"$2" | head -1 | cut -d= -f2-; }
+# pvalidate: STRICT validation of the last preview response ($PPREV/$PRC/$PST)
+# against the whole-of-contract shape, BEFORE its hash is trusted to open an intent.
+# Sets PVALID (1/0) + PVMSG. A crashed planner (empty/garbage), a status outside the
+# closed set, a half-formed plan digest (hash without records or vice versa), an
+# out-of-contract key, or exit/status disagreement all fail here — fail-closed, so a
+# malformed response can never be handed to rab-exercise. Invariants: schema_version
+# 1; status in the nine closed values; verb a string, packages an array; resource and
+# detail string-or-null; records an array; the digest is ALL-present (plan_schema 1,
+# plan_hash 64-hex, records nonempty) or ALL-absent (both null, no records); no key
+# outside the contract; and exit 0 iff status is ok/no_op.
+pvalidate() {
+    PVALID=0; PVMSG=""
+    local shape
+    shape=$(jq -e '
+        (.schema_version==1)
+        and (.status|IN("ok","no_op","schema_invalid","resolve_failed","package_not_owned",
+              "held","protected_package","dpkg_broken","internal"))
+        and (.verb|type=="string") and (.packages|type=="array")
+        and (.resource==null or (.resource|type=="string"))
+        and (.detail==null or (.detail|type=="string"))
+        and (.records|type=="array")
+        and ( (.plan_schema==1 and (.plan_hash|type=="string" and test("^[0-9a-f]{64}$"))
+                 and (.records|length)>0)
+              or (.plan_schema==null and .plan_hash==null and (.records|length)==0) )
+        and (([keys[]]-["schema_version","status","verb","packages","plan_schema",
+              "resource","plan_hash","records","detail"])|length==0)
+    ' <<<"$PPREV" >/dev/null 2>&1 && echo 1 || echo 0)
+    if [ "$shape" != 1 ]; then PVMSG="response violates the strict contract shape"; return; fi
+    case "$PST" in
+        ok|no_op) [ "$PRC" -eq 0 ] || { PVMSG="exit $PRC for status=$PST (want 0)"; return; } ;;
+        *)        [ "$PRC" -ne 0 ] || { PVMSG="exit 0 for status=$PST (want nonzero)"; return; } ;;
+    esac
+    PVALID=1
+}
 # do_plan: the issue-time resource + plan_hash from the PRODUCTION planner
 # runix-apt-preview, run UNPRIVILEGED as aptbot (the actor that opens the intent),
 # exactly as pkgops will — NOT the root pkgexec-plan diagnostic. One strict JSON
 # request in, one strict JSON object out. Sets PPREV (the full JSON, for detailed
 # assertions), PST (.status), PH (.plan_hash, "" when JSON null e.g. a no_op), PR
-# (.resource, "" when null), and PRC (planner exit: 0 iff ok/no_op). The usable-plan
-# test the gates use stays `PRC==0 && -n PH` (ok carries a hash; no_op does not).
+# (.resource, "" when null), and PRC (planner exit: 0 iff ok/no_op). It then STRICTLY
+# validates the response (pvalidate) and emits a gate, so every preview is proven
+# contract-valid before any gate hands its hash to rab-exercise. The usable-plan test
+# the gates use stays `PRC==0 && -n PH` (ok carries a hash; no_op does not).
 do_plan() { # verb [pkgs...]
     local verb=$1; shift
     PPREV=$(jq -cn --arg v "$verb" \
@@ -91,6 +135,9 @@ do_plan() { # verb [pkgs...]
     PST=$(jq -r '.status // ""' <<<"$PPREV" 2>/dev/null)
     PH=$(jq -r '.plan_hash // ""' <<<"$PPREV" 2>/dev/null)
     PR=$(jq -r '.resource // ""' <<<"$PPREV" 2>/dev/null)
+    pvalidate
+    local lbl="preview[$verb${*:+ $*}]"
+    [ "$PVALID" = 1 ] && ok "$lbl strict-valid ($PST)" || no "$lbl INVALID" "$PVMSG"
 }
 do_ex() { # [--replay] <verb> <resource> <hash> [pkgs...] -> EXRC,EXSTATUS,EXDETAIL,EXEFFECT,EXOUTCOME,EXCID,EXREPLAY
     local args=()
@@ -452,7 +499,7 @@ echo "########## G-INLINE: apt.update over an inline-Signed-By source -> inline-
 # only for this gate (like the drift source), so the other update gates keep their
 # hash. apt.update must fetch AND verify it (signed), the preview must show the key
 # as inline-sha256:<hex> and never leak armor, and that exact hash must redeem.
-sudo cp /srv/canary-inline.sources /etc/apt/sources.list.d/canary-inline.sources
+sudo cp /srv/canary-inline.sources "$INLINESRC"
 sudo apt-get update -qq
 do_plan apt.update
 ISB=$(jq -r '.records[]|select(.uri|test("canary-signed"))|.options."signed-by" // empty' <<<"$PPREV")
@@ -462,15 +509,15 @@ ISB=$(jq -r '.records[]|select(.uri|test("canary-signed"))|.options."signed-by" 
 grep -q "BEGIN PGP" <<<"$PPREV" \
     && no "G-INLINE armor leak" "armored key material in preview stdout" \
     || ok "G-INLINE no armored key material in preview output"
-if [ "$PRC" = 0 ] && [ -n "$PH" ]; then
+if [ "$PVALID" = 1 ] && [ "$PRC" = 0 ] && [ -n "$PH" ]; then
     do_ex apt.update "" "$PH"
     { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
         && ok "G-INLINE preview hash redeems through the locked update effector" \
         || no "G-INLINE redeem" "status=$EXSTATUS eff=$EXEFFECT"
 else
-    no "G-INLINE plan" "PRC=$PRC hash='${PH:0:12}' (no receipt issued)"
+    no "G-INLINE plan" "valid=$PVALID PRC=$PRC hash='${PH:0:12}' (no receipt issued)"
 fi
-sudo rm -f /etc/apt/sources.list.d/canary-inline.sources
+sudo rm -f "$INLINESRC"
 sudo apt-get update -qq
 
 echo "########## G-PREV-OWN: preview refuses rapt-owned (package_not_owned), opens NO intent ##########"

@@ -24,11 +24,14 @@ integration. That is the point of the slice: freeze and prove the boundary befor
   request `{schema_version, verb, packages}`, reusing the effectors' shared
   `apt_common` descriptor builders and `pkgx_digest_*`, so a matching cache yields the
   matching hash. Nine closed statuses; exit 0 iff `ok`/`no_op`; a policy refusal
-  carries the full records + hash + offender; a `no_op` carries no hash. Successful
-  receipt redemption from this hash is the parity proof — the advisory preview matched
-  the effector's atomic locked re-resolution. Installed from the pkgexec `.deb` (on
-  PATH at `/usr/bin`); the root `pkgexec-plan` diagnostic is no longer used by the
-  gates.
+  carries the full records + hash + offender; a `no_op` carries no hash. The harness
+  STRICTLY validates every preview response against the whole contract (schema, closed
+  status set, all-present/all-absent plan digest, no out-of-contract key, exit/status
+  agreement) BEFORE it trusts the hash to `rab-exercise` — a malformed planner fails
+  the run before any redemption. Successful receipt redemption from this hash is the
+  parity proof — the advisory preview matched the effector's atomic locked
+  re-resolution. Installed from the pkgexec `.deb` (on PATH at `/usr/bin`); the root
+  `pkgexec-plan` diagnostic is no longer used by the gates.
 - **`rab-exercise`** (broker `tools/rab-exercise.c`, run as the principal): the
   whole lifecycle in ONE process (the outcome binding is pinned to the opener's
   full process identity). Verifies the broker peer is uid 0; `open_intent(+effect)`;
