@@ -77,8 +77,8 @@ docs, integration tests, deployment). The package builds from the repo root;
 | [pkgstate](https://github.com/cornball-ai/pkgstate) | dpkg/apt read-only introspection | experimental |
 | [rsystemd](https://github.com/cornball-ai/rsystemd) | systemd introspection + managed mutation | experimental |
 | [rctl](https://github.com/cornball-ai/rctl) | machine-drivable CLI over the subsystems | experimental |
-| [runix-audit-broker](https://github.com/cornball-ai/runix-audit-broker) | privileged AF_UNIX broker (C): system-durable two-phase audit + effect-receipts | experimental |
-| [pkgexec](https://github.com/cornball-ai/pkgexec) | privileged apt effector (C, libapt-pkg): nine per-verb pkexec/polkit binaries that commit behind the broker receipt gate | experimental |
+| [runix-audit-broker](https://github.com/cornball-ai/runix-audit-broker) | root-owned Unix-socket broker for system-durable two-phase audit and single-use effect receipts | experimental |
+| [pkgexec](https://github.com/cornball-ai/pkgexec) | native libapt-pkg effector: nine verb-isolated pkexec/polkit entrypoints that commit only after redeeming a broker-issued receipt | experimental |
 | [rapt](https://github.com/cornball-ai/rapt) | r2u binary R-package install backend (bspm alternative) | shipping |
 
 ## License
