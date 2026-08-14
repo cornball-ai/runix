@@ -59,9 +59,14 @@ Pinned contract:
 
 - **A separate, installed, unprivileged binary** `runix-apt-preview`. **Not** a
   `--preview` mode on the privileged entrypoints, and **not** re-derived in R.
-- **Reuses the committer's own code**: the same `pkgx_apt_map_txn` and `pkgx_digest_*`
-  the nine effectors and the VM oracle use. One code path computes the digest, so a
-  matching cache yields a matching hash.
+- **Reuses the committer's own descriptor code, per verb.** The transaction descriptor
+  already comes from the shared `pkgx_apt_map_txn`; the planner slice **extracts three
+  read-only descriptor builders for `update`, `hold`, and `configure`** (today
+  duplicated between their effectors and `tools/plan.cc`) so the planner and the
+  effectors each call one implementation. With `pkgx_digest_*` on top, one code path per
+  verb computes the digest, so a matching cache yields a matching hash. Mirrored
+  enumeration with receipt-mismatch as the only backstop is rejected: it would weaken
+  the single-source planner this arc deliberately chose.
 - **Read-only, lockless, no mutation.** Opens the apt cache without the dpkg frontend
   lock, calls no committer, safe as any user any number of times.
 - **Request grammar matches pkgexec v1**: a strict stdin request
@@ -266,9 +271,14 @@ is no durable pkgops-side approval token.
 
 ## 8. Cross-repo boundaries
 
-- **pkgexec**: adds the unprivileged read-only planner `runix-apt-preview` (§3), reusing
-  `pkgx_apt_map_txn` + `pkgx_digest_*`; no change to the nine committing entrypoints or
-  the redeem gate. Its own reviewed slice, VM-linked as before.
+- **pkgexec**: adds the unprivileged read-only planner `runix-apt-preview` (§3), and
+  performs a **behavior-preserving extraction** of three shared read-only descriptor
+  builders (`update`, `hold`, `configure`) that both the planner and the existing
+  `apt_update` / `apt_hold` / `apt_configure` effectors call (the transaction path
+  already shares `pkgx_apt_map_txn`); the redeem gate and commit logic are unchanged.
+  The slice ships **byte-identical digest/golden tests for every verb, planner-versus-
+  effector parity tests, and disposable-VM coverage for `update`, `hold`/`unhold`, and
+  `configure` before the refactor merges**. Its own reviewed slice, VM-linked.
 - **runix**: the **exported native effect-session API** (§4.5) is C in the common core;
   plus the typed conditions for the new failure modes (`runix_helper_bad_result`,
   preview / verification / capability conditions) through the shared taxonomy +
@@ -292,12 +302,14 @@ transactions, partial states) is proven only on the VM.
 
 ## 10. Resolved in review
 
-The planner boundary (§3), the branched lifecycle with a plain machine-mode
-`approval_required` intent (§4), the native effect-session state machine (§4.5), the
-known-effect-closes outcome rule (§4.8), the verb-specific records and pinned request
-grammar (§3, §6.1), tri-state `effect_issued` (§6.2), and the per-verb verification
-including every resolved record (§6.3) are all settled here. Remaining detail (the exact
-record field grammar of `runix-apt-preview`, the native session's R-facing handle type,
-and the one new pkgstate selection accessor's signature) is implementation detail for
-the pkgexec planner slice, the runix session API, and the pkgstate accessor
+The planner boundary and the shared per-verb descriptor extraction (§3, §8), the
+branched lifecycle with a plain machine-mode `approval_required` intent (§4), the native
+effect-session state machine (§4.5), the known-effect-closes outcome rule (§4.8), the
+verb-specific records and pinned request grammar (§3, §6.1), tri-state `effect_issued`
+(§6.2), and the per-verb verification including every resolved record (§6.3) are all
+settled here. Remaining detail (the exact record field grammar of `runix-apt-preview`,
+the native session's R-facing handle type, and the one new pkgstate selection accessor's
+signature) is implementation detail for the pkgexec planner slice (which also lands the
+update/hold/configure builder extraction behind byte-identical golden + planner/effector
+parity + disposable-VM tests), the runix session API, and the pkgstate accessor
 respectively, each its own small reviewed change; no further broad design round.
