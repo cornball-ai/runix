@@ -19,6 +19,7 @@ REPO=/srv/canary-repo
 TEMPRULE=/etc/polkit-1/rules.d/49-canary-apt-temp.rules
 BROKENSRC=/etc/apt/sources.list.d/canary-broken.sources
 DRIFTSRC=/etc/apt/sources.list.d/canary-drift.sources
+PIN=/etc/apt/preferences.d/99-canary-g5-pin
 ZERO=0000000000000000000000000000000000000000000000000000000000000000
 LOCKPID=""
 pass=0; fail=0
@@ -34,7 +35,7 @@ fi
 
 cleanup() {
     [ -n "$LOCKPID" ] && { kill "$LOCKPID" 2>/dev/null; wait "$LOCKPID" 2>/dev/null; }
-    sudo rm -f "$BROKENSRC" "$DRIFTSRC" 2>/dev/null || true
+    sudo rm -f "$BROKENSRC" "$DRIFTSRC" "$PIN" 2>/dev/null || true
     if [ -e "$TEMPRULE" ]; then
         sudo rm -f "$TEMPRULE"; sudo systemctl restart polkit 2>/dev/null; sleep 1
     fi
@@ -87,6 +88,23 @@ do_ex() { # [--replay] <verb> <resource> <hash> [pkgs...] -> EXRC,EXSTATUS,EXDET
 }
 dpkg_state() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null; }
 dpkg_ver() { dpkg-query -W -f='${Version}' "$1" 2>/dev/null; }
+# Pin every CURRENTLY-upgradable package EXCEPT canary-benign to its installed
+# version, so a whole-system apt.upgrade is isolated to the canary 1.0->1.1
+# transition (the base cloud image carries unrelated pending upgrades). Enumerated
+# from the SAME cache the effector reads, so plan and commit agree. Removed by
+# unpin_others and, as a safety net, in the cleanup trap.
+pin_others() {
+    : | sudo tee "$PIN" >/dev/null
+    local pkg ver
+    while read -r pkg; do
+        { [ -z "$pkg" ] || [ "$pkg" = canary-benign ]; } && continue
+        ver=$(dpkg_ver "$pkg")
+        [ -n "$ver" ] || continue
+        printf 'Package: %s\nPin: version %s\nPin-Priority: 1001\n\n' "$pkg" "$ver" \
+            | sudo tee -a "$PIN" >/dev/null
+    done < <(apt list --upgradable 2>/dev/null | awk -F/ 'NR>1 {print $1}')
+}
+unpin_others() { sudo rm -f "$PIN"; }
 # Kill a pid and ALL its descendants deepest-first (so dpkg/postinst cannot outlive
 # the entrypoint and complete the install), as root. Used to interrupt the whole
 # helper transaction subtree (pkexec down) while leaving rab-exercise (its parent) alive.
@@ -166,13 +184,32 @@ ungrant
 
 echo "########## G5: whole-system upgrade (temp-grant) 1.0 -> 1.1 ##########"
 grant upgrade
+# Setup + PROVE it: install canary-benign 1.0 and assert it BEFORE planning, so a
+# silently failed fixture install surfaces here (as the precondition) rather than
+# later as an unexplained empty post-upgrade version.
 sudo apt-get install -y --allow-downgrades canary-benign=1.0 >/dev/null 2>&1
+[ "$(dpkg_ver canary-benign)" = 1.0 ] \
+    && ok "G5 setup: canary-benign == 1.0 before upgrade" \
+    || no "G5 setup" "ver=$(dpkg_ver canary-benign) (expected 1.0)"
+# Isolate the whole-system upgrade to the canary transition: pin every OTHER
+# upgradable package to its installed version (removed below and in the trap).
+pin_others
+# Assert the SIMULATED whole-system upgrade (same FORBID_REMOVE semantics as the
+# effector's apt.upgrade) is EXACTLY canary-benign 1.0->1.1 and nothing else.
+SIM=$(apt-get -s upgrade --with-new-pkgs 2>/dev/null | grep -E '^(Inst|Remv|Purg) ')
+CBLINE=$(grep -E '^Inst canary-benign \[1\.0\] \(1\.1' <<<"$SIM")
+OTHER=$(grep -vE '^Inst canary-benign ' <<<"$SIM" | grep -E '^(Inst|Remv|Purg) ')
+{ [ -n "$CBLINE" ] && [ -z "$OTHER" ]; } \
+    && ok "G5 plan: only canary-benign 1.0->1.1, no unrelated changes" \
+    || no "G5 plan" "cb='$CBLINE' other='$(tr '\n' ';' <<<"$OTHER")'"
+# Run the real helper over the isolated transaction.
 do_plan apt.upgrade
 do_ex apt.upgrade "$PR" "$PH"
 { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
     && ok "G5 upgrade status ok" || no "G5 upgrade" "status=$EXSTATUS eff=$EXEFFECT"
 [ "$(dpkg_ver canary-benign)" = 1.1 ] \
     && ok "G5 canary-benign upgraded to 1.1 (native)" || no "G5 dpkg" "ver=$(dpkg_ver canary-benign)"
+unpin_others
 ungrant
 
 echo "########## G8: hold (autonomous) then unhold (temp-grant), selection read-back ##########"
@@ -281,11 +318,34 @@ BGPID=$!
 # the configure (postinst) is mid-run — the real post-redeem interruption window.
 MARKED=0
 for _ in $(seq 1 120); do [ -e /run/canary-slow.marker ] && { MARKED=1; break; }; sleep 0.5; done
-# Kill the ENTIRE helper transaction subtree (pkexec -> entrypoint -> dpkg ->
-# postinst -> sleep) deepest-first, so no descendant completes the install; leave
-# rab-exercise (the parent) alive to observe the lost result.
-PKPID=$(pgrep -f "pkexec $LIBX/runix-apt-install" 2>/dev/null | head -1)
-kill_subtree "$PKPID"
+# The pkexec-spawned privileged helper is reparented under polkitd — it is NOT a
+# child of the pkexec client, so killing the client leaves dpkg running to
+# completion (the transaction finishes and records outcome=ok). Locate the EXACT
+# privileged process by /proc/<pid>/exe and require exactly one root-owned match,
+# then kill ITS descendant tree deepest-first (dpkg -> postinst -> sleep) and the
+# helper itself — never the client. rab-exercise (the parent) stays alive.
+helpers_now() { # print each root-owned pid whose exe is the install entrypoint
+    local p exe u
+    for p in $(pgrep -f "$LIBX/runix-apt-install" 2>/dev/null); do
+        exe=$(sudo readlink -f "/proc/$p/exe" 2>/dev/null)
+        u=$(sudo awk '/^Uid:/{print $2; exit}' "/proc/$p/status" 2>/dev/null)
+        [ "$exe" = "$LIBX/runix-apt-install" ] && [ "$u" = 0 ] && echo "$p"
+    done
+}
+mapfile -t HELPERS < <(helpers_now)
+[ "${#HELPERS[@]}" -eq 1 ] \
+    && ok "G-INT one root helper located (pid ${HELPERS[0]}, /proc/exe=$LIBX/runix-apt-install)" \
+    || no "G-INT locate" "expected exactly 1 root-owned helper, found ${#HELPERS[@]}"
+PKPID=${HELPERS[0]:-}
+[ -n "$PKPID" ] && kill_subtree "$PKPID"
+# Verify the ENTIRE transaction subtree is gone before evaluating the outcome.
+SUBGONE=0
+for _ in $(seq 1 40); do
+    [ -z "$(helpers_now)" ] && { SUBGONE=1; break; }
+    sleep 0.25
+done
+[ "$SUBGONE" -eq 1 ] && ok "G-INT transaction subtree gone before evaluation" \
+    || no "G-INT subtree" "a root-owned helper survived the kill"
 wait "$BGPID" 2>/dev/null; INTRC=$?
 iline=$(grep '^RESULT ' "$INTOUT" | head -1); icid=$(field cid "$iline"); iout=$(field outcome "$iline")
 rm -f "$INTOUT"
