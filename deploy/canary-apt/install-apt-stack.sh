@@ -70,9 +70,23 @@ command -v rab-exercise >/dev/null && command -v fcntl-lock >/dev/null \
     && echo "  rab-exercise + lock-holder on PATH" || { echo "  MISSING oracle"; fail=1; }
 # the PRODUCTION planner ships in the pkgexec .deb (on PATH at /usr/bin); the gates
 # invoke it unprivileged as aptbot for the issue-time hash. Prove it installed + runs
-# (schema_invalid never opens the cache, so it is deterministic here).
-if [ -x /usr/bin/runix-apt-preview ] \
-   && printf 'not json' | runix-apt-preview 2>/dev/null | grep -q '"status":"schema_invalid"'; then
+# (schema_invalid never opens the cache, so it is deterministic here). It exits 1 on
+# schema_invalid (exit 0 iff ok/no_op), and this script runs under `set -o pipefail`,
+# so a `... | grep` would inherit that nonzero exit even on a MATCH. Capture output +
+# rc explicitly (no `|| true`, which would hide an unexpected exit) and assert rc==1
+# AND the full strict shape via jq.
+PREVOUT=""
+PREVRC=127
+if [ -x /usr/bin/runix-apt-preview ]; then
+    PREVRC=0
+    PREVOUT=$(printf 'not json' | /usr/bin/runix-apt-preview 2>/dev/null) \
+        || PREVRC=$?
+fi
+if [ "$PREVRC" -eq 1 ] \
+   && jq -e '.schema_version == 1
+              and .status == "schema_invalid"
+              and .detail == "bad_json"' \
+        <<<"$PREVOUT" >/dev/null; then
     echo "  runix-apt-preview installed from .deb + runs (/usr/bin)"
 else
     echo "  MISSING/broken runix-apt-preview (from the pkgexec .deb)"; fail=1
