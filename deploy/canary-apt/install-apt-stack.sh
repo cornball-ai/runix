@@ -5,10 +5,12 @@
 # (from the activation branch). This proves the packaged boundary end to end:
 #   - the broker `.deb` (socket-activated) that issues + redeems effect receipts;
 #   - the pkgexec `.deb`: nine root-owned entrypoints in /usr/libexec/pkgexec, the
-#     polkit policy (nine actions) + rules (two autonomous actions), and the
-#     runix-apt-autonomous system group created EMPTY by the maintainer script;
-#   - the two VM-only, uninstalled oracles the acceptance driver needs
-#     (rab-exercise, pkgexec-plan) built from the same sources.
+#     unprivileged runix-apt-preview planner in /usr/bin, the polkit policy (nine
+#     actions) + rules (two autonomous actions), and the runix-apt-autonomous system
+#     group created EMPTY by the maintainer script;
+#   - the VM-only rab-exercise lifecycle oracle, built from the same source. The
+#     issue-time hash now comes from the PACKAGED runix-apt-preview (the production
+#     planner installed from the .deb), not the root pkgexec-plan diagnostic.
 #
 # No R stack: rab-exercise stands in for pkgops, so this proves the NATIVE helper
 # boundary, not the future pkgops integration (recorded honestly in the runbook).
@@ -38,12 +40,10 @@ cd "$SRC/pkgexec"
 dpkg-buildpackage -b -us -uc
 sudo apt-get install -y "$SRC"/pkgexec_*.deb
 
-log "build the VM-only oracles + fcntl lock-holder (NEVER packaged; same sources)"
+log "build the VM-only rab-exercise oracle + fcntl lock-holder (NEVER packaged)"
 make -C "$SRC/runix-audit-broker" exercise
-make -C "$SRC/pkgexec" plan
 cc -O2 -Wall -o "$SRC/fcntl-lock.bin" "$SRC/fcntl-lock.c"
 sudo install -m 0755 "$SRC/runix-audit-broker/rab-exercise" /usr/local/bin/rab-exercise
-sudo install -m 0755 "$SRC/pkgexec/pkgexec-plan" /usr/local/bin/pkgexec-plan
 sudo install -m 0755 "$SRC/fcntl-lock.bin" /usr/local/bin/fcntl-lock
 
 log "verify install surface"
@@ -66,9 +66,31 @@ if getent group runix-apt-autonomous >/dev/null; then
 else
     echo "  MISSING group runix-apt-autonomous"; fail=1
 fi
-command -v rab-exercise >/dev/null && command -v pkgexec-plan >/dev/null \
-    && command -v fcntl-lock >/dev/null \
-    && echo "  oracles + lock-holder on PATH" || { echo "  MISSING oracles"; fail=1; }
+command -v rab-exercise >/dev/null && command -v fcntl-lock >/dev/null \
+    && echo "  rab-exercise + lock-holder on PATH" || { echo "  MISSING oracle"; fail=1; }
+# the PRODUCTION planner ships in the pkgexec .deb (on PATH at /usr/bin); the gates
+# invoke it unprivileged as aptbot for the issue-time hash. Prove it installed + runs
+# (schema_invalid never opens the cache, so it is deterministic here). It exits 1 on
+# schema_invalid (exit 0 iff ok/no_op), and this script runs under `set -o pipefail`,
+# so a `... | grep` would inherit that nonzero exit even on a MATCH. Capture output +
+# rc explicitly (no `|| true`, which would hide an unexpected exit) and assert rc==1
+# AND the full strict shape via jq.
+PREVOUT=""
+PREVRC=127
+if [ -x /usr/bin/runix-apt-preview ]; then
+    PREVRC=0
+    PREVOUT=$(printf 'not json' | /usr/bin/runix-apt-preview 2>/dev/null) \
+        || PREVRC=$?
+fi
+if [ "$PREVRC" -eq 1 ] \
+   && jq -e '.schema_version == 1
+              and .status == "schema_invalid"
+              and .detail == "bad_json"' \
+        <<<"$PREVOUT" >/dev/null; then
+    echo "  runix-apt-preview installed from .deb + runs (/usr/bin)"
+else
+    echo "  MISSING/broken runix-apt-preview (from the pkgexec .deb)"; fail=1
+fi
 echo "  broker: $(dpkg-query -W -f='${Version}' runix-audit-broker 2>/dev/null)"
 echo "  pkgexec: $(dpkg-query -W -f='${Version}' pkgexec 2>/dev/null)"
 [ "$fail" -eq 0 ] && echo "install-apt-stack: OK" || { echo "install-apt-stack: FAILED"; exit 1; }

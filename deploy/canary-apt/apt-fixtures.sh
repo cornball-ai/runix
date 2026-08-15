@@ -91,4 +91,65 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y canary-protected r-cornba
 echo "  canary-benign:      $(apt-cache madison canary-benign | awk '{print $3}' | tr '\n' ' ')"
 echo "  canary-protected:   $(dpkg-query -W -f='${Version} (${Priority})' canary-protected 2>/dev/null)"
 echo "  r-cornball-canary:  $(dpkg-query -W -f='${Version}' r-cornball-canary 2>/dev/null) (installed)"
+
+# --- inline-Signed-By signed repo (schema-1 signed-by normalization gate) ---------
+# A dedicated GPG-signed flat repo whose deb822 source carries an INLINE armored
+# public key (not a keyring path). apt.update must fetch AND verify it, so the update
+# effector's ListUpdate succeeds and the receipt redeems; the preview and effector
+# must both normalize the inline key to inline-sha256:<hex>. The .sources file is
+# STAGED at /srv/canary-inline.sources (NOT in sources.list.d); the G-INLINE gate
+# copies it in and removes it, so the other update gates keep their existing hash.
+log "inline-Signed-By signed repo (signed-by normalization gate)"
+# No `|| true`: a failed install here must abort (set -e), not silently proceed to a
+# cryptic gpg/apt-ftparchive "command not found". Prove BOTH tools are present after.
+sudo apt-get install -y -qq gnupg apt-utils >/dev/null
+command -v gpg >/dev/null && command -v apt-ftparchive >/dev/null \
+    || { echo "apt-fixtures: FATAL: gpg/apt-ftparchive missing after install" >&2; exit 1; }
+SIGNREPO=/srv/canary-signed
+GH="$BUILD/gnupg"; mkdir -p "$GH"; chmod 700 "$GH"
+cat > "$BUILD/keyparams" <<'EOF'
+%no-protection
+Key-Type: eddsa
+Key-Curve: ed25519
+Key-Usage: sign
+Name-Real: Canary Inline Signer
+Name-Email: canary-inline@localhost
+Expire-Date: 0
+%commit
+EOF
+GNUPGHOME="$GH" gpg --batch --gen-key "$BUILD/keyparams" >/dev/null 2>&1
+sudo mkdir -p "$SIGNREPO"; sudo chown "$(id -u)":"$(id -g)" "$SIGNREPO"
+cp "$REPO/canary-benign_1.1_all.deb" "$SIGNREPO/"
+( cd "$SIGNREPO" && dpkg-scanpackages --multiversion . /dev/null > Packages && gzip -9c Packages > Packages.gz )
+( cd "$SIGNREPO" && apt-ftparchive release . > Release )
+GNUPGHOME="$GH" gpg --batch --yes --clearsign -o "$SIGNREPO/InRelease" "$SIGNREPO/Release"
+GNUPGHOME="$GH" gpg --batch --yes -abs -o "$SIGNREPO/Release.gpg" "$SIGNREPO/Release"
+# Fold the armored public key into a deb822 inline Signed-By (blank lines -> " .",
+# every line prefixed with a space), staged out of sources.list.d.
+{
+    echo "Types: deb"
+    echo "URIs: file://$SIGNREPO"
+    echo "Suites: ./"
+    echo "Enabled: yes"
+    echo "Signed-By:"
+    GNUPGHOME="$GH" gpg --batch --armor --export canary-inline@localhost \
+        | sed -e 's/^[[:space:]]*$/./' -e 's/^/ /'
+} | sudo tee /srv/canary-inline.sources >/dev/null
+# Prove the staged source refreshes AND verifies via ITS OWN inline key before the
+# gate depends on it (a broken signature here is exactly the fixture failure G-INLINE
+# would otherwise surface as an unexplained update failure, so abort now). Isolate it
+# in a temp sourceparts DIR with the system keyrings excluded, so success proves the
+# inline Signed-By key alone verified it. Nothing is left in the system sources.list.d;
+# the G-INLINE gate adds it there for its own run.
+VDIR="$BUILD/inline-verify"; mkdir -p "$VDIR"
+cp /srv/canary-inline.sources "$VDIR/canary-inline.sources"
+if sudo apt-get update -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts="$VDIR" \
+       -o Dir::Etc::trusted=/dev/null -o Dir::Etc::trustedparts=/dev/null \
+       -qq 2>"$BUILD/inline-update.err"; then
+    echo "  inline-key repo signed + verified via its inline key (staged at /srv/canary-inline.sources)"
+else
+    echo "apt-fixtures: FATAL: inline-key repo did not verify via its inline key:" >&2
+    cat "$BUILD/inline-update.err" >&2
+    exit 1
+fi
 echo "apt-fixtures: OK"

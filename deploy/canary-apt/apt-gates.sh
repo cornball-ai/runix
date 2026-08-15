@@ -1,10 +1,12 @@
 #!/bin/bash
 # §7 apt-mutation acceptance gates (libapt-pkg-helper-plan.md §7) inside the guest.
-# Run as `ubuntu`. Drives the NATIVE helper boundary via the two VM-only oracles:
-#   pkgexec-plan  (root): the issue-time digest source (resource + plan_hash)
-#   rab-exercise  (aptbot): the one-process open->helper->outcome lifecycle
+# Run as `ubuntu`. Drives the NATIVE helper boundary via:
+#   runix-apt-preview (aptbot): the PRODUCTION planner — the unprivileged, read-only
+#                     issue-time digest source (resource + plan_hash), exactly the
+#                     binary pkgops will call. NOT the root pkgexec-plan diagnostic.
+#   rab-exercise      (aptbot): the one-process open->helper->outcome lifecycle
 # Native observations only (dpkg-query, the audit sink); no R stack, so this proves
-# the native helper boundary, not the future pkgops integration.
+# the native helper boundary with the production planner's hash driving redemption.
 #
 # Autonomous verbs (update/hold) run as aptbot directly. Every OTHER verb — unhold
 # included — is gated, so it follows codex's rule: the default-denial matrix is
@@ -19,6 +21,7 @@ REPO=/srv/canary-repo
 TEMPRULE=/etc/polkit-1/rules.d/49-canary-apt-temp.rules
 BROKENSRC=/etc/apt/sources.list.d/canary-broken.sources
 DRIFTSRC=/etc/apt/sources.list.d/canary-drift.sources
+INLINESRC=/etc/apt/sources.list.d/canary-inline.sources
 PIN=/etc/apt/preferences.d/99-canary-g5-pin
 ZERO=0000000000000000000000000000000000000000000000000000000000000000
 LOCKPID=""
@@ -38,10 +41,17 @@ if [ -e "$PIN" ]; then
     echo "REFUSING: a stale G5 pin file exists ($PIN); remove it first" >&2
     exit 1
 fi
+# Refuse a stale inline-key source too: left in sources.list.d it joins EVERY
+# apt.update digest (an extra source in the plan), silently changing the other update
+# gates' hashes and masking exactly what G-INLINE is meant to prove.
+if [ -e "$INLINESRC" ]; then
+    echo "REFUSING: a stale inline-key source exists ($INLINESRC); remove it first" >&2
+    exit 1
+fi
 
 cleanup() {
     [ -n "$LOCKPID" ] && { kill "$LOCKPID" 2>/dev/null; wait "$LOCKPID" 2>/dev/null; }
-    sudo rm -f "$BROKENSRC" "$DRIFTSRC" "$PIN" 2>/dev/null || true
+    sudo rm -f "$BROKENSRC" "$DRIFTSRC" "$INLINESRC" "$PIN" 2>/dev/null || true
     if [ -e "$TEMPRULE" ]; then
         sudo rm -f "$TEMPRULE"; sudo systemctl restart polkit 2>/dev/null; sleep 1
     fi
@@ -73,13 +83,108 @@ ungrant() {
 }
 
 field() { grep -oE "$1=[^ ]*" <<<"$2" | head -1 | cut -d= -f2-; }
-do_plan() { # verb [pkgs...] -> PH, PR, PRC
-    local out
-    out=$(sudo pkgexec-plan "$@" 2>/dev/null)
-    PRC=$?
-    PH=$(grep -oE '^plan_hash=.*' <<<"$out" | cut -d= -f2)
-    PR=$(grep -oE '^resource=.*' <<<"$out" | cut -d= -f2-)
+# rec_schema: the record shape the planner emits for a verb (decode_records in
+# preview.cc). Sets RKEYS (the EXACT sorted key set of each record), RARR (array-typed
+# keys) and ROBJ (object-typed keys); every other key must be a string. update ->
+# source records; install/remove/purge/upgrade/dist_upgrade -> transaction records;
+# hold/unhold -> selection records; configure -> pending-config records.
+rec_schema() { # verb
+    case "$1" in
+        apt.update)
+            RKEYS='["components","options","suite","uri"]'; RARR='["components"]'; ROBJ='["options"]' ;;
+        apt.install|apt.remove|apt.purge|apt.upgrade|apt.dist_upgrade)
+            RKEYS='["action","architecture","flags","from_version","package","to_version"]'
+            RARR='["flags"]'; ROBJ='[]' ;;
+        apt.hold|apt.unhold)
+            RKEYS='["from_state","package","to_state"]'; RARR='[]'; ROBJ='[]' ;;
+        apt.configure)
+            RKEYS='["architecture","current_version","package","state"]'; RARR='[]'; ROBJ='[]' ;;
+        *) RKEYS='[]'; RARR='[]'; ROBJ='[]' ;;
+    esac
 }
+# pvalidate: STRICT whole-of-contract validation of the last preview response
+# ($PPREV/$PRC/$PST) against the REQUEST it answered ($REQ_VERB/$REQ_PKGS_JSON and the
+# verb's record schema), BEFORE its hash is ever trusted. Sets PVALID (1/0) + PVMSG,
+# fail-closed. It enforces: schema_version 1; status in the nine closed values; the
+# EXACT nine-key object (so a MISSING key, which jq would read as null, is rejected as
+# firmly as an extra one); verb + packages ECHO the request; resource/detail
+# string-or-null; records an array. The plan digest is pinned to the status, not merely
+# self-consistent: ok/package_not_owned/held/protected_package MUST carry a digest
+# (plan_schema 1, 64-hex hash, >=1 record) and no_op/schema_invalid/resolve_failed/
+# dpkg_broken/internal MUST NOT. Each record must have exactly the verb's key set with
+# array/object/string types as decoded. Finally exit 0 iff status is ok/no_op.
+pvalidate() {
+    PVALID=0; PVMSG=""
+    local shape
+    shape=$(jq -e \
+        --arg wv "$REQ_VERB" --argjson wp "$REQ_PKGS_JSON" \
+        --argjson rk "$RKEYS" --argjson ra "$RARR" --argjson ro "$ROBJ" '
+        (.schema_version==1)
+        and (.status|IN("ok","no_op","schema_invalid","resolve_failed","package_not_owned",
+              "held","protected_package","dpkg_broken","internal"))
+        and (keys==["detail","packages","plan_hash","plan_schema","records",
+              "resource","schema_version","status","verb"])
+        and (.verb==$wv) and (.packages==$wp)
+        and (.resource==null or (.resource|type=="string"))
+        and (.detail==null or (.detail|type=="string"))
+        and (.records|type=="array")
+        and ( if (.status|IN("ok","package_not_owned","held","protected_package"))
+              then (.plan_schema==1 and (.plan_hash|type=="string" and test("^[0-9a-f]{64}$"))
+                     and (.records|length)>0)
+              else (.plan_schema==null and .plan_hash==null and (.records|length)==0)
+              end )
+        and ( .records|all(
+                (keys==$rk)
+                and (to_entries|all(
+                    if   (.key|IN($ra[])) then (.value|type=="array")
+                    elif (.key|IN($ro[])) then (.value|type=="object")
+                    else (.value|type=="string") end )) ) )
+    ' <<<"$PPREV" >/dev/null 2>&1 && echo 1 || echo 0)
+    if [ "$shape" != 1 ]; then PVMSG="response violates the strict contract shape"; return; fi
+    case "$PST" in
+        ok|no_op) [ "$PRC" -eq 0 ] || { PVMSG="exit $PRC for status=$PST (want 0)"; return; } ;;
+        *)        [ "$PRC" -ne 0 ] || { PVMSG="exit 0 for status=$PST (want nonzero)"; return; } ;;
+    esac
+    PVALID=1
+}
+# plan_run: fetch the issue-time resource + plan_hash from the PRODUCTION planner
+# runix-apt-preview, run UNPRIVILEGED as aptbot (the actor that opens the intent),
+# exactly as pkgops will — NOT the root pkgexec-plan diagnostic. One strict JSON
+# request in, one strict JSON object out. Records the REQUEST ($REQ_VERB/$REQ_PKGS_*)
+# so pvalidate can prove the echo, and sets PPREV (full JSON), PST (.status), PH
+# (.plan_hash, "" when null), PR (.resource, "" when null), PRC (exit: 0 iff ok/no_op).
+plan_run() { # verb [pkgs...]
+    REQ_VERB=$1; shift
+    REQ_PKGS_STR="$*"
+    REQ_PKGS_JSON=$(jq -cn '$ARGS.positional' --args "$@")
+    rec_schema "$REQ_VERB"
+    PPREV=$(jq -cn --arg v "$REQ_VERB" \
+                '{schema_version:1,verb:$v,packages:$ARGS.positional}' --args "$@" \
+            | sudo -u aptbot runix-apt-preview 2>/dev/null)
+    PRC=$?
+    PST=$(jq -r '.status // ""' <<<"$PPREV" 2>/dev/null)
+    PH=$(jq -r '.plan_hash // ""' <<<"$PPREV" 2>/dev/null)
+    PR=$(jq -r '.resource // ""' <<<"$PPREV" 2>/dev/null)
+}
+# plan_guard: strictly validate the fetched response and HARD-STOP the whole run if it
+# is invalid: a malformed production planner voids the parity proof, so the script
+# exits BEFORE any gate can hand a bogus hash to rab-exercise (do NOT weaken this to a
+# per-gate check; several gates call do_ex unconditionally). Valid previews emit a
+# strict-valid gate and continue.
+plan_guard() {
+    pvalidate
+    local lbl="preview[$REQ_VERB${REQ_PKGS_STR:+ $REQ_PKGS_STR}]"
+    if [ "$PVALID" = 1 ]; then
+        ok "$lbl strict-valid ($PST)"
+    else
+        no "$lbl INVALID -> hard-stop" "$PVMSG"
+        exit 1
+    fi
+}
+# do_plan: fetch + strictly validate. On an invalid response it never returns (the run
+# aborts), so no caller can proceed to redeem an unvalidated hash. The usable-plan test
+# the gates then use stays `PRC==0 && -n PH` (ok carries a hash; no_op does not).
+do_plan() { plan_run "$@"; plan_guard; }
 do_ex() { # [--replay] <verb> <resource> <hash> [pkgs...] -> EXRC,EXSTATUS,EXDETAIL,EXEFFECT,EXOUTCOME,EXCID,EXREPLAY
     local args=()
     if [ "${1:-}" = "--replay" ]; then args+=(--replay); shift; fi
@@ -168,6 +273,41 @@ audit_intent_outcome() { # cid label
         && ok "$2 audit: intent+outcome, actor=$act" \
         || no "$2 audit" "intent=$ni outcome=$no actor=$act"
 }
+
+echo "########## G-NEG: a malformed preview hard-stops before rab-exercise (issuer-side) ##########"
+# Prove the strict validator is a REAL gate, not advisory: an invalid planner response
+# must hard-stop do_plan so rab-exercise is NEVER invoked. Each case injects a crafted
+# response and runs the SAME plan_guard the real gates use, in a subshell with a
+# tripwire do_ex; an invalid case must exit nonzero with the tripwire untouched, and a
+# valid control must proceed and fire it.
+neg_hardstop() { # name PPREV PH PRC expect(stop=1|proceed=0)
+    local name=$1 pv=$2 ph=$3 rc=$4 expect=$5 TRIP; TRIP=$(mktemp -u)
+    ( do_ex() { : >"$TRIP"; }                    # tripwire: fires iff rab-exercise runs
+      PPREV=$pv; PST=$(jq -r '.status // ""' <<<"$pv" 2>/dev/null); PH=$ph; PRC=$rc
+      REQ_VERB=apt.install; REQ_PKGS_STR=x; REQ_PKGS_JSON='["x"]'; rec_schema apt.install
+      plan_guard                                 # exits 1 iff invalid
+      do_ex apt.install x "$ph" x ) >/dev/null 2>&1
+    local rc2=$?
+    if [ "$expect" = 1 ]; then
+        { [ "$rc2" -ne 0 ] && [ ! -e "$TRIP" ]; } \
+            && ok "G-NEG $name hard-stopped, rab-exercise not invoked" \
+            || no "G-NEG $name" "rc=$rc2 trip=$([ -e "$TRIP" ] && echo FIRED || echo clean)"
+    else
+        { [ "$rc2" -eq 0 ] && [ -e "$TRIP" ]; } \
+            && ok "G-NEG $name valid -> proceeds to rab-exercise" \
+            || no "G-NEG $name" "rc=$rc2 trip=$([ -e "$TRIP" ] && echo fired || echo MISSING)"
+    fi
+    rm -f "$TRIP"
+}
+NEGH=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+NEGTXN='[{"package":"x","architecture":"amd64","action":"install","from_version":"","to_version":"1.0","flags":[]}]'
+neg_hardstop "ok-no-digest"     '{"schema_version":1,"status":"ok","verb":"apt.install","packages":["x"],"plan_schema":null,"resource":"x","plan_hash":null,"records":[],"detail":null}' "" 0 1
+neg_hardstop "noop-with-digest" "{\"schema_version\":1,\"status\":\"no_op\",\"verb\":\"apt.install\",\"packages\":[\"x\"],\"plan_schema\":1,\"resource\":\"x\",\"plan_hash\":\"$NEGH\",\"records\":$NEGTXN,\"detail\":null}" "$NEGH" 0 1
+neg_hardstop "verb-mismatch"    '{"schema_version":1,"status":"no_op","verb":"apt.remove","packages":["x"],"plan_schema":null,"resource":"x","plan_hash":null,"records":[],"detail":null}' "" 0 1
+neg_hardstop "missing-key"      '{"schema_version":1,"status":"no_op","verb":"apt.install","packages":["x"],"plan_schema":null,"resource":"x","plan_hash":null,"records":[]}' "" 0 1
+neg_hardstop "bad-record"       "{\"schema_version\":1,\"status\":\"ok\",\"verb\":\"apt.install\",\"packages\":[\"x\"],\"plan_schema\":1,\"resource\":\"x\",\"plan_hash\":\"$NEGH\",\"records\":[{\"uri\":\"u\",\"suite\":\"s\",\"components\":[],\"options\":{}}],\"detail\":null}" "$NEGH" 0 1
+neg_hardstop "exit-mismatch"    "{\"schema_version\":1,\"status\":\"ok\",\"verb\":\"apt.install\",\"packages\":[\"x\"],\"plan_schema\":1,\"resource\":\"x\",\"plan_hash\":\"$NEGH\",\"records\":$NEGTXN,\"detail\":null}" "$NEGH" 1 1
+neg_hardstop "valid-control"    "{\"schema_version\":1,\"status\":\"ok\",\"verb\":\"apt.install\",\"packages\":[\"x\"],\"plan_schema\":1,\"resource\":\"x\",\"plan_hash\":\"$NEGH\",\"records\":$NEGTXN,\"detail\":null}" "$NEGH" 0 0
 
 echo "########## G1: update good-source -> applied, durable audit ##########"
 do_plan apt.update
@@ -434,6 +574,69 @@ ungrant
 echo "  [cleanup] removing the deliberately-broken canary-badpost"
 sudo dpkg --remove --force-remove-reinstreq canary-badpost >/dev/null 2>&1 || true
 sudo dpkg --purge canary-badpost >/dev/null 2>&1 || true
+
+echo "########## G-INLINE: apt.update over an inline-Signed-By source -> inline-sha256, redeems ##########"
+# The signed inline-key repo is staged out of sources.list.d by the fixtures; add it
+# only for this gate (like the drift source), so the other update gates keep their
+# hash. apt.update must fetch AND verify it (signed), the preview must show the key
+# as inline-sha256:<hex> and never leak armor, and that exact hash must redeem.
+sudo cp /srv/canary-inline.sources "$INLINESRC"
+sudo apt-get update -qq
+do_plan apt.update
+ISB=$(jq -r '.records[]|select(.uri|test("canary-signed"))|.options."signed-by" // empty' <<<"$PPREV")
+[[ "$ISB" =~ ^inline-sha256:[0-9a-f]{64}$ ]] \
+    && ok "G-INLINE preview record signed-by=$ISB" \
+    || no "G-INLINE inline-sha256" "signed-by='$ISB'"
+grep -q "BEGIN PGP" <<<"$PPREV" \
+    && no "G-INLINE armor leak" "armored key material in preview stdout" \
+    || ok "G-INLINE no armored key material in preview output"
+if [ "$PVALID" = 1 ] && [ "$PRC" = 0 ] && [ -n "$PH" ]; then
+    do_ex apt.update "" "$PH"
+    { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
+        && ok "G-INLINE preview hash redeems through the locked update effector" \
+        || no "G-INLINE redeem" "status=$EXSTATUS eff=$EXEFFECT"
+else
+    no "G-INLINE plan" "valid=$PVALID PRC=$PRC hash='${PH:0:12}' (no receipt issued)"
+fi
+sudo rm -f "$INLINESRC"
+sudo apt-get update -qq
+
+echo "########## G-PREV-OWN: preview refuses rapt-owned (package_not_owned), opens NO intent ##########"
+# The FUTURE issuer's behavior: a preview refusal stops before open_intent. Prove it
+# natively — runix-apt-preview as aptbot refuses, we never call rab-exercise, and the
+# audit sink is byte-identical across the preview (no intent, no record). This is
+# additive to G-OWN, which still proves the privileged boundary's own defense.
+SB0=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+do_plan apt.hold r-cornball-canary
+SB1=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+POWN=$(jq -e '.status=="package_not_owned" and .verb=="apt.hold"
+    and .packages==["r-cornball-canary"] and .plan_schema==1
+    and .resource=="r-cornball-canary" and (.plan_hash|test("^[0-9a-f]{64}$"))
+    and (.records|length)>0 and .detail=="r-cornball-canary"' <<<"$PPREV" >/dev/null \
+    && echo 1 || echo 0)
+{ [ "$POWN" = 1 ] && [ "$PST" = package_not_owned ] && [ "$PRC" -ne 0 ]; } \
+    && ok "G-PREV-OWN strict package_not_owned + nonzero exit (no rab-exercise)" \
+    || no "G-PREV-OWN response" "status=$PST rc=$PRC strict=$POWN"
+{ [ -n "$SB0" ] && [ "$SB0" = "$SB1" ]; } \
+    && ok "G-PREV-OWN audit sink byte-identical (no intent opened)" \
+    || no "G-PREV-OWN sink" "sink '$SB0' -> '$SB1'"
+
+echo "########## G-PREV-NOOP: preview no_op (already satisfied), opens NO intent ##########"
+# canary-protected is installed at its only version -> an empty transaction -> no_op,
+# distinct from a refusal. The issuer opens no intent; prove the sink is untouched.
+SB0=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+do_plan apt.install canary-protected
+SB1=$(sudo sha256sum "$SINK" 2>/dev/null | cut -d' ' -f1)
+PNOOP=$(jq -e '.status=="no_op" and .verb=="apt.install"
+    and .packages==["canary-protected"] and .plan_schema==null and .plan_hash==null
+    and (.records|length)==0 and .resource=="canary-protected" and .detail==null' <<<"$PPREV" >/dev/null \
+    && echo 1 || echo 0)
+{ [ "$PNOOP" = 1 ] && [ "$PST" = no_op ] && [ "$PRC" -eq 0 ]; } \
+    && ok "G-PREV-NOOP strict no_op + exit 0 (no rab-exercise)" \
+    || no "G-PREV-NOOP response" "status=$PST rc=$PRC strict=$PNOOP"
+{ [ -n "$SB0" ] && [ "$SB0" = "$SB1" ]; } \
+    && ok "G-PREV-NOOP audit sink byte-identical (no intent opened)" \
+    || no "G-PREV-NOOP sink" "sink '$SB0' -> '$SB1'"
 
 echo
 echo "==== §7 apt-mutation gates: $pass passed, $fail failed ===="
