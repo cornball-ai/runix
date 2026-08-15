@@ -25,13 +25,16 @@ integration. That is the point of the slice: freeze and prove the boundary befor
   `apt_common` descriptor builders and `pkgx_digest_*`, so a matching cache yields the
   matching hash. Nine closed statuses; exit 0 iff `ok`/`no_op`; a policy refusal
   carries the full records + hash + offender; a `no_op` carries no hash. The harness
-  STRICTLY validates every preview response against the whole contract (schema, closed
-  status set, all-present/all-absent plan digest, no out-of-contract key, exit/status
-  agreement) BEFORE it trusts the hash to `rab-exercise` — a malformed planner fails
-  the run before any redemption. Successful receipt redemption from this hash is the
-  parity proof — the advisory preview matched the effector's atomic locked
-  re-resolution. Installed from the pkgexec `.deb` (on PATH at `/usr/bin`); the root
-  `pkgexec-plan` diagnostic is no longer used by the gates.
+  STRICTLY validates every preview response against the whole contract BEFORE it trusts
+  the hash to `rab-exercise`: schema, the closed status set, the EXACT nine-key object
+  (a missing key is rejected as firmly as an extra one), verb + packages echoing the
+  request, per-verb record schema, a plan digest PINNED to the status (present for
+  `ok`/`package_not_owned`/`held`/`protected_package`, absent otherwise), and exit 0
+  iff `ok`/`no_op`. An invalid response HARD-STOPS the run before any redemption (see
+  G-NEG). Successful receipt redemption from a valid hash is the parity proof: the
+  advisory preview matched the effector's atomic locked re-resolution. Installed from
+  the pkgexec `.deb` (on PATH at `/usr/bin`); the root `pkgexec-plan` diagnostic is no
+  longer used by the gates.
 - **`rab-exercise`** (broker `tools/rab-exercise.c`, run as the principal): the
   whole lifecycle in ONE process (the outcome binding is pinned to the opener's
   full process identity). Verifies the broker peer is uid 0; `open_intent(+effect)`;
@@ -98,6 +101,7 @@ runtime is VM-only.
 | G15 entrypoint isolation | a package arg to `update` is **rejected** (`internal`, no effect); nothing installed |
 | G-INT interrupted transaction | SIGKILL mid-commit → `outcome=open`; redeemed-no-outcome intent + dpkg ground truth |
 | G-INLINE update, inline-Signed-By source | preview record `signed-by=inline-sha256:<64hex>`, no armored key in evidence; that exact preview hash redeems through the locked update effector (`ok`, `effect_issued:true`) |
+| G-NEG malformed preview (issuer-side) | a contract-violating preview (missing key, verb/records mismatch, status-mismatched digest, exit disagreement) HARD-STOPS `do_plan` with a nonzero exit and a tripwire `do_ex` never fires; a valid control proceeds |
 | G-PREV-OWN preview refusal (issuer-side) | `runix-apt-preview` (aptbot) returns strict `package_not_owned` + nonzero exit; **no** `rab-exercise`; audit sink byte-identical (no intent opened) |
 | G-PREV-NOOP preview no-op (issuer-side) | `runix-apt-preview` (aptbot) returns strict `no_op` + exit 0; **no** `rab-exercise`; audit sink byte-identical (no intent opened) |
 
