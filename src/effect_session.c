@@ -87,27 +87,32 @@ static SEXP es_open_result(SEXP handle, const char *cid, const char *status,
 
 #ifdef __linux__
 
+#include <dirent.h> /* /proc/self/fd sweep (closefrom fallback) */
 #include <errno.h>
 #include <fcntl.h>
 #include <jansson.h>
 #include <poll.h>
 #include <signal.h>
-#include <spawn.h>     /* posix_spawn of the pkexec entrypoint */
+#include <spawn.h>        /* posix_spawn of the pkexec entrypoint */
 #include <stdlib.h>
-#include <sys/types.h> /* pid_t */
-#include <sys/wait.h>  /* waitpid */
-#include <time.h>      /* nanosleep */
-#include <unistd.h>    /* getpid, pipe, read */
+#include <sys/resource.h> /* getrlimit (closefrom fallback) */
+#include <sys/types.h>    /* pid_t */
+#include <sys/wait.h>     /* waitpid */
+#include <time.h>         /* nanosleep */
+#include <unistd.h>       /* getpid, pipe, read */
 
 extern char **environ; /* passed to posix_spawn; pkexec scrubs it itself */
 
 /* posix_spawn_file_actions_addclosefrom_np(3) closes every inherited fd at or
- * above a given number in the child, so nothing the R process holds open (the
+ * above a given number IN THE CHILD, so nothing the R process holds open (the
  * broker socket, package DBs, user files) leaks to pkexec or the privileged
- * entrypoint. glibc 2.34+. Where it is unavailable we fall back to explicitly
- * closing only the pipe fds (dup2 already redirects 0/1), accepting that other
- * inherited descriptors are governed by their own CLOEXEC flags. */
-#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+ * entrypoint. glibc 2.34+. Where it is unavailable, es_cloexec_from() below is
+ * a real fallback that holds the same invariant (mark every inherited fd >= 3
+ * CLOEXEC in the parent so it closes at the child's exec) rather than leaving
+ * descriptors to leak. RUNIX_NO_CLOSEFROM_NP forces the fallback for a compile
+ * check of that path. */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ) &&                            \
+    !defined(RUNIX_NO_CLOSEFROM_NP)
 #if __GLIBC_PREREQ(2, 34)
 #define RUNIX_HAVE_CLOSEFROM_NP 1
 #endif
@@ -903,6 +908,49 @@ static int es_pipe_write(int fd, const unsigned char *buf, size_t n,
     return 0;
 }
 
+/* Fallback for the closefrom primitive: mark every inherited fd >= lowfd
+ * CLOEXEC in the PARENT, so it closes at the child's exec. Harmless to R, which
+ * never exec()s (CLOEXEC has no effect until exec). Prefer /proc/self/fd (only
+ * the truly-open fds); if it is unavailable, sweep the whole RLIMIT_NOFILE
+ * range so the invariant still holds. The dup2 targets (child stdin/stdout) are
+ * created WITHOUT CLOEXEC by posix_spawn's dup2 action, so redirection is
+ * unaffected. Best-effort per fd, but the range is fully covered. */
+static void es_cloexec_from(int lowfd) {
+    DIR *d = opendir("/proc/self/fd");
+    if (d != NULL) {
+        int dfd = dirfd(d);
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] < '0' || e->d_name[0] > '9') {
+                continue;
+            }
+            int fd = (int) strtol(e->d_name, NULL, 10);
+            if (fd < lowfd || fd == dfd) {
+                continue;
+            }
+            int fl = fcntl(fd, F_GETFD, 0);
+            if (fl >= 0 && !(fl & FD_CLOEXEC)) {
+                (void) fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+            }
+        }
+        closedir(d);
+        return;
+    }
+    /* no /proc: cover the whole descriptor range instead of leaking */
+    long maxfd = 4096;
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
+        rl.rlim_cur > 0) {
+        maxfd = (long) rl.rlim_cur;
+    }
+    for (long fd = lowfd; fd < maxfd; fd++) {
+        int fl = fcntl((int) fd, F_GETFD, 0);
+        if (fl >= 0 && !(fl & FD_CLOEXEC)) {
+            (void) fcntl((int) fd, F_SETFD, fl | FD_CLOEXEC);
+        }
+    }
+}
+
 /* Spawn argv (absolute path, no shell), deliver `req` on the child's stdin and
  * WIPE it immediately, read the child's stdout (its result channel) to a bounded
  * buffer under a wall-clock deadline, and reap the child (SIGKILL on overrun).
@@ -954,11 +1002,27 @@ static int es_run_commit(char *const argv[], char *req, size_t reqlen,
     if (fe == 0) {
         fe = posix_spawn_file_actions_addclose(&fa, resp[1]);
     }
+    /* Close every OTHER inherited fd (>= 3) so nothing R holds leaks to the
+     * privileged child. Prefer the in-child closefrom primitive; otherwise (or
+     * when a testing build forces it) fall back to the parent-side CLOEXEC
+     * sweep, which holds the same invariant. */
+    int use_sweep = 0;
+#ifndef RUNIX_HAVE_CLOSEFROM_NP
+    use_sweep = 1;
+#endif
+#ifdef RUNIX_TESTING
+    if (getenv("RUNIX_TEST_FORCE_CLOEXEC_SWEEP") != NULL) {
+        use_sweep = 1;
+    }
+#endif
 #ifdef RUNIX_HAVE_CLOSEFROM_NP
-    if (fe == 0) {
+    if (!use_sweep && fe == 0) {
         fe = posix_spawn_file_actions_addclosefrom_np(&fa, 3);
     }
 #endif
+    if (use_sweep) {
+        es_cloexec_from(3);
+    }
     if (fe != 0) {
         posix_spawn_file_actions_destroy(&fa);
         close(reqp[0]);
@@ -999,8 +1063,14 @@ static int es_run_commit(char *const argv[], char *req, size_t reqlen,
      * sigaction failed we must not write: a child that closed its stdin would
      * signal-kill the R process. Refusing the write leaves the receipt
      * undelivered and the effect UNKNOWN (fail-closed) -- never risked against a
-     * signal. es_pipe_write's result is recorded, not discarded. */
-    if (have_old && dl >= 0) {
+     * signal. es_pipe_write's result is recorded, not discarded; a caller that
+     * did not deliver must not trust any result the child then produces. */
+    int skip_write = 0;
+#ifdef RUNIX_TESTING
+    /* exercise the undelivered-but-child-answered branch deterministically */
+    skip_write = (getenv("RUNIX_TEST_FORCE_UNDELIVERED") != NULL);
+#endif
+    if (have_old && dl >= 0 && !skip_write) {
         io->delivered =
             (es_pipe_write(reqp[1], (const unsigned char *) req, reqlen, dl) == 0)
                 ? 1
@@ -1147,6 +1217,11 @@ SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
             error("package names must be non-NA");
         }
         const char *nm = CHAR(e);
+        /* an embedded NUL would truncate the name here and pass a shortened
+         * value to the pattern check and the JSON; refuse it outright */
+        if ((size_t) LENGTH(e) != strlen(nm)) {
+            error("package name must not contain an embedded NUL");
+        }
         if (!runix_pkg_name_ok(nm)) {
             error("invalid package name");
         }
@@ -1234,8 +1309,10 @@ SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
         exit_consistent = io.exited && ((success && io.exit_code == 0) ||
                                         (!success && io.exit_code != 0));
     }
-    if (parsed && exit_consistent) {
-        /* the helper spoke consistently: its status and effect_issued rule */
+    if (parsed && exit_consistent && io.delivered) {
+        /* the helper spoke consistently AND we actually delivered the receipt:
+         * its status and effect_issued rule. A valid-looking result we did not
+         * deliver for (a guessed/replayed correlation id) is never trusted. */
         session_status = "ok";
         rstatus = status;
         rdetail = detail;
@@ -1253,7 +1330,8 @@ SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
         s->state = ES_RESULT_KNOWN;
     } else {
         /* the child ran but produced no trustworthy result (no body, malformed,
-         * cid mismatch, or exit/status contradiction): the effect is UNKNOWN */
+         * cid mismatch, exit/status contradiction, or a result for a receipt we
+         * never delivered): the effect is UNKNOWN */
         session_status = "effect_unknown";
         issued_tri = -1;
         s->state = ES_EFFECT_UNKNOWN;

@@ -47,7 +47,16 @@ const char *rab_arg_string(SEXP x, const char *what) {
     if (TYPEOF(x) != STRSXP || LENGTH(x) != 1 || STRING_ELT(x, 0) == NA_STRING) {
         error("%s must be a single non-NA string", what);
     }
-    return CHAR(STRING_ELT(x, 0));
+    SEXP e = STRING_ELT(x, 0);
+    /* An embedded NUL makes the CHARSXP's byte length exceed its C-string
+     * length; a bare CHAR() would silently truncate at the NUL and hand
+     * downstream code (validation, JSON) a shortened value. Refuse it. R itself
+     * blocks embedded NULs on construction, so this guards a non-standard
+     * caller (e.g. another C extension building the CHARSXP by hand). */
+    if ((size_t) LENGTH(e) != strlen(CHAR(e))) {
+        error("%s must not contain an embedded NUL", what);
+    }
+    return CHAR(e);
 }
 
 int rab_arg_nonneg_int(SEXP x, const char *what) {

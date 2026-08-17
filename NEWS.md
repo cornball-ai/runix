@@ -61,6 +61,20 @@
     outcome as effect-UNKNOWN: the privileged apt work runs in a separate polkit
     scope that killing pkexec need not stop, so a late-completing mutation must
     never be read as "did not run".
+- Second review round (three follow-up blockers):
+  - A commit result is trusted only when the receipt was actually DELIVERED: an
+    undelivered receipt whose child nonetheless returns a valid, correlation-id
+    matching result (a guessed or replayed id) is classified effect-UNKNOWN, not
+    trusted.
+  - The fd-hygiene invariant no longer degrades to inheritance on glibc < 2.34:
+    `es_cloexec_from()` is a real fallback that marks every inherited fd >= 3
+    close-on-exec in the parent (via `/proc/self/fd`, or the full
+    `RLIMIT_NOFILE` range if `/proc` is absent), holding the same "nothing
+    leaks" guarantee as `addclosefrom_np`.
+  - Every native string input is rejected if it carries an embedded NUL
+    (byte-length != C-string length) before validation or serialization, so a
+    hand-built `CHARSXP` cannot be truncated silently. (Ordinary R construction
+    already refuses embedded NULs, so this guards a non-standard C caller.)
 
 # runix 0.0.1.10
 

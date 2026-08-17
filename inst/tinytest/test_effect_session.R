@@ -258,6 +258,13 @@ if (is_linux && tinytest::at_home() &&
         "#!/bin/sh",
         "cat > \"$RUNIX_TEST_REQ_DUMP\"",
         "printf '%s\\n' \"$@\" > \"$RUNIX_TEST_ARGV_DUMP\"",
+        ## fd-hygiene probe: record whether the parent's leak-sentinel fd was
+        ## inherited (its symlink target visible in /proc/self/fd)
+        paste0("if [ -n \"$RUNIX_TEST_SENTINEL_PATH\" ]; then ",
+               ": > \"$RUNIX_TEST_SENTINEL_DUMP\"; ",
+               "for f in /proc/self/fd/*; do ",
+               "[ \"$(readlink \"$f\" 2>/dev/null)\" = \"$RUNIX_TEST_SENTINEL_PATH\" ]",
+               " && echo LEAKED >> \"$RUNIX_TEST_SENTINEL_DUMP\"; done; fi"),
         "[ -n \"$RUNIX_TEST_SLEEP\" ] && sleep \"$RUNIX_TEST_SLEEP\"",
         "[ -n \"$RUNIX_TEST_RESULT\" ] && printf '%s' \"$RUNIX_TEST_RESULT\"",
         "exit \"${RUNIX_TEST_EXIT:-0}\""), fake)
@@ -268,7 +275,10 @@ if (is_linux && tinytest::at_home() &&
                RUNIX_TEST_ARGV_DUMP = argv_dump)
     on.exit(Sys.unsetenv(c("RUNIX_TEST_ENTRYPOINT", "RUNIX_TEST_REQ_DUMP",
                            "RUNIX_TEST_ARGV_DUMP", "RUNIX_TEST_RESULT",
-                           "RUNIX_TEST_EXIT", "RUNIX_TEST_SLEEP")), add = TRUE)
+                           "RUNIX_TEST_EXIT", "RUNIX_TEST_SLEEP",
+                           "RUNIX_TEST_SENTINEL_PATH", "RUNIX_TEST_SENTINEL_DUMP",
+                           "RUNIX_TEST_FORCE_UNDELIVERED",
+                           "RUNIX_TEST_FORCE_CLOEXEC_SWEEP")), add = TRUE)
 
     result_ok <- runix:::encode_json_line(list(
         status = "ok", effect_issued = TRUE, correlation_id = cid, detail = ""))
@@ -292,9 +302,12 @@ if (is_linux && tinytest::at_home() &&
         frame_json(open_ok_effect), # 6  s6 open (ok status, exit 1 -> unknown)
         frame_json(open_ok_effect), # 7  s7 open (held status, exit 1 -> ok/held)
         frame_json(open_ok_effect), # 8  s8 open (sleep past deadline -> unknown)
-        frame_json(open_ok_effect), # 9  s4 open (bad entrypoint -> spawn_failed)
-        frame_json(open_ok_effect), # 10 s_ins open (install: input-bound errors)
-        frame_json(open_ok_effect)  # 11 s_upd open (update: arity error)
+        frame_json(open_ok_effect), # 9  sund open (undelivered -> unknown)
+        frame_json(open_ok_effect), # 10 sfd open (fd hygiene: closefrom path)
+        frame_json(open_ok_effect), # 11 sfd2 open (fd hygiene: sweep fallback)
+        frame_json(open_ok_effect), # 12 s4 open (bad entrypoint -> spawn_failed)
+        frame_json(open_ok_effect), # 13 s_ins open (install: input-bound errors)
+        frame_json(open_ok_effect)  # 14 s_upd open (update: arity error)
     ), read_first = TRUE))
     copen <- function(operation = "apt.install", resource = "nginx") {
         r <- list(status = "unavailable")
@@ -400,6 +413,66 @@ if (is_linux && tinytest::at_home() &&
     expect_equal(c8$session_status, "effect_unknown")
     expect_true(is.na(c8$effect_issued))
     Sys.unsetenv("RUNIX_TEST_SLEEP")
+
+    ## --- re-review Finding 1: a valid, cid-matching result is NOT trusted when
+    ## the receipt was never delivered. The forced-undelivered seam skips the
+    ## stdin write; the child still emits result_ok (which carries the known,
+    ## fixed cid), yet the outcome must be effect UNKNOWN, not a trusted "ok".
+    Sys.setenv(RUNIX_TEST_RESULT = result_ok, RUNIX_TEST_FORCE_UNDELIVERED = "1")
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+    sund <- copen()
+    cund <- runix:::.effect_session_commit(sund$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(cund$session_status, "effect_unknown")
+    expect_true(is.na(cund$effect_issued))
+    Sys.unsetenv("RUNIX_TEST_FORCE_UNDELIVERED")
+
+    ## --- re-review Finding 2: no inherited fd >= 3 leaks to the privileged
+    ## child. R's own file-connection fds are NOT close-on-exec, so an open
+    ## connection is a genuine leak sentinel. Assert (precondition) it really is
+    ## non-CLOEXEC in the parent -- else the check would pass vacuously -- then
+    ## assert the child never sees it, once via the in-child closefrom primitive
+    ## and once via the parent-side CLOEXEC sweep fallback (forced on).
+    sentinel_path <- tempfile("leak-sentinel-")
+    sentinel_con <- file(sentinel_path, open = "wb")
+    O_CLOEXEC <- strtoi("2000000", base = 8L) # 02000000 octal
+    sentinel_leaky <- FALSE
+    for (f in list.files("/proc/self/fd")) {
+        if (identical(Sys.readlink(file.path("/proc/self/fd", f)), sentinel_path)) {
+            fl <- readLines(file.path("/proc/self/fdinfo", f))
+            oct <- strtoi(sub("flags:[[:space:]]*", "",
+                              grep("^flags:", fl, value = TRUE)), base = 8L)
+            sentinel_leaky <- bitwAnd(oct, O_CLOEXEC) == 0L
+            break
+        }
+    }
+    expect_true(sentinel_leaky) # precondition: the sentinel really can leak
+
+    sentinel_dump <- tempfile("sentinel-dump-")
+    Sys.setenv(RUNIX_TEST_RESULT = result_ok,
+               RUNIX_TEST_SENTINEL_PATH = sentinel_path,
+               RUNIX_TEST_SENTINEL_DUMP = sentinel_dump)
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+
+    ## (a) the in-child closefrom primitive (default on glibc 2.34+)
+    sfd <- copen()
+    cfd <- runix:::.effect_session_commit(sfd$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(cfd$session_status, "ok")
+    leaked <- if (file.exists(sentinel_dump)) readLines(sentinel_dump) else character()
+    expect_false(any(grepl("LEAKED", leaked)))
+
+    ## (b) the parent-side CLOEXEC sweep fallback, forced on
+    Sys.setenv(RUNIX_TEST_FORCE_CLOEXEC_SWEEP = "1")
+    sfd2 <- copen()
+    cfd2 <- runix:::.effect_session_commit(sfd2$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(cfd2$session_status, "ok")
+    leaked2 <- if (file.exists(sentinel_dump)) readLines(sentinel_dump) else character()
+    expect_false(any(grepl("LEAKED", leaked2)))
+    Sys.unsetenv("RUNIX_TEST_FORCE_CLOEXEC_SWEEP")
+    close(sentinel_con)
+    Sys.unsetenv(c("RUNIX_TEST_SENTINEL_PATH", "RUNIX_TEST_SENTINEL_DUMP"))
 
     ## a spawn that never execs (nonexistent entrypoint): provably no effect
     Sys.setenv(RUNIX_TEST_ENTRYPOINT = "/no/such/runix-entrypoint-xyzzy")
