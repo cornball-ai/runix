@@ -87,30 +87,30 @@ static SEXP es_open_result(SEXP handle, const char *cid, const char *status,
 
 #ifdef __linux__
 
-#include <dirent.h> /* /proc/self/fd sweep (closefrom fallback) */
 #include <errno.h>
 #include <fcntl.h>
 #include <jansson.h>
 #include <poll.h>
 #include <signal.h>
-#include <spawn.h>        /* posix_spawn of the pkexec entrypoint */
+#include <spawn.h>     /* posix_spawn of the pkexec entrypoint */
 #include <stdlib.h>
-#include <sys/resource.h> /* getrlimit (closefrom fallback) */
-#include <sys/types.h>    /* pid_t */
-#include <sys/wait.h>     /* waitpid */
-#include <time.h>         /* nanosleep */
-#include <unistd.h>       /* getpid, pipe, read */
+#include <sys/types.h> /* pid_t */
+#include <sys/wait.h>  /* waitpid */
+#include <time.h>      /* nanosleep */
+#include <unistd.h>    /* getpid, pipe, read */
 
 extern char **environ; /* passed to posix_spawn; pkexec scrubs it itself */
 
 /* posix_spawn_file_actions_addclosefrom_np(3) closes every inherited fd at or
- * above a given number IN THE CHILD, so nothing the R process holds open (the
- * broker socket, package DBs, user files) leaks to pkexec or the privileged
- * entrypoint. glibc 2.34+. Where it is unavailable, es_cloexec_from() below is
- * a real fallback that holds the same invariant (mark every inherited fd >= 3
- * CLOEXEC in the parent so it closes at the child's exec) rather than leaving
- * descriptors to leak. RUNIX_NO_CLOSEFROM_NP forces the fallback for a compile
- * check of that path. */
+ * above a given number IN THE CHILD, atomically with respect to the parent, so
+ * nothing the R process holds open (the broker socket, package DBs, user files)
+ * leaks to pkexec or the privileged entrypoint -- and no other thread can open
+ * a descriptor into the gap. glibc 2.34+. This is the ONLY way to hold the
+ * "nothing leaks" invariant under posix_spawn: a parent-side sweep races a
+ * concurrent open and mutates the caller's own descriptors. Where the primitive
+ * is unavailable the commit path is refused fail-closed (effect_session_commit
+ * errors), never spawned with an unbounded fd set. RUNIX_NO_CLOSEFROM_NP forces
+ * that unavailable-platform path for a build/test of the refusal. */
 #if defined(__GLIBC__) && defined(__GLIBC_PREREQ) &&                            \
     !defined(RUNIX_NO_CLOSEFROM_NP)
 #if __GLIBC_PREREQ(2, 34)
@@ -908,49 +908,6 @@ static int es_pipe_write(int fd, const unsigned char *buf, size_t n,
     return 0;
 }
 
-/* Fallback for the closefrom primitive: mark every inherited fd >= lowfd
- * CLOEXEC in the PARENT, so it closes at the child's exec. Harmless to R, which
- * never exec()s (CLOEXEC has no effect until exec). Prefer /proc/self/fd (only
- * the truly-open fds); if it is unavailable, sweep the whole RLIMIT_NOFILE
- * range so the invariant still holds. The dup2 targets (child stdin/stdout) are
- * created WITHOUT CLOEXEC by posix_spawn's dup2 action, so redirection is
- * unaffected. Best-effort per fd, but the range is fully covered. */
-static void es_cloexec_from(int lowfd) {
-    DIR *d = opendir("/proc/self/fd");
-    if (d != NULL) {
-        int dfd = dirfd(d);
-        struct dirent *e;
-        while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] < '0' || e->d_name[0] > '9') {
-                continue;
-            }
-            int fd = (int) strtol(e->d_name, NULL, 10);
-            if (fd < lowfd || fd == dfd) {
-                continue;
-            }
-            int fl = fcntl(fd, F_GETFD, 0);
-            if (fl >= 0 && !(fl & FD_CLOEXEC)) {
-                (void) fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
-            }
-        }
-        closedir(d);
-        return;
-    }
-    /* no /proc: cover the whole descriptor range instead of leaking */
-    long maxfd = 4096;
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY &&
-        rl.rlim_cur > 0) {
-        maxfd = (long) rl.rlim_cur;
-    }
-    for (long fd = lowfd; fd < maxfd; fd++) {
-        int fl = fcntl((int) fd, F_GETFD, 0);
-        if (fl >= 0 && !(fl & FD_CLOEXEC)) {
-            (void) fcntl((int) fd, F_SETFD, fl | FD_CLOEXEC);
-        }
-    }
-}
-
 /* Spawn argv (absolute path, no shell), deliver `req` on the child's stdin and
  * WIPE it immediately, read the child's stdout (its result channel) to a bounded
  * buffer under a wall-clock deadline, and reap the child (SIGKILL on overrun).
@@ -1002,27 +959,23 @@ static int es_run_commit(char *const argv[], char *req, size_t reqlen,
     if (fe == 0) {
         fe = posix_spawn_file_actions_addclose(&fa, resp[1]);
     }
-    /* Close every OTHER inherited fd (>= 3) so nothing R holds leaks to the
-     * privileged child. Prefer the in-child closefrom primitive; otherwise (or
-     * when a testing build forces it) fall back to the parent-side CLOEXEC
-     * sweep, which holds the same invariant. */
-    int use_sweep = 0;
-#ifndef RUNIX_HAVE_CLOSEFROM_NP
-    use_sweep = 1;
-#endif
-#ifdef RUNIX_TESTING
-    if (getenv("RUNIX_TEST_FORCE_CLOEXEC_SWEEP") != NULL) {
-        use_sweep = 1;
-    }
-#endif
+    /* Close every OTHER inherited fd (>= 3) atomically in the child, so nothing
+     * R holds leaks to the privileged process. Without this primitive we do not
+     * spawn at all (fail-closed): effect_session_commit refuses first, and this
+     * guard is the belt-and-suspenders backstop for any direct caller. */
 #ifdef RUNIX_HAVE_CLOSEFROM_NP
-    if (!use_sweep && fe == 0) {
+    if (fe == 0) {
         fe = posix_spawn_file_actions_addclosefrom_np(&fa, 3);
     }
+#else
+    posix_spawn_file_actions_destroy(&fa);
+    close(reqp[0]);
+    close(reqp[1]);
+    close(resp[0]);
+    close(resp[1]);
+    explicit_bzero(req, reqlen);
+    return -1; /* no atomic fd-close primitive: refuse to spawn */
 #endif
-    if (use_sweep) {
-        es_cloexec_from(3);
-    }
     if (fe != 0) {
         posix_spawn_file_actions_destroy(&fa);
         close(reqp[0]);
@@ -1178,6 +1131,17 @@ static SEXP es_commit_result(const char *session_status, const char *status,
  * boolean. */
 SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
                            SEXP deadline_ms_) {
+#ifndef RUNIX_HAVE_CLOSEFROM_NP
+    /* No atomic child-side fd-close primitive on this platform: we cannot
+     * guarantee that no inherited descriptor leaks to the privileged helper, so
+     * refuse the commit fail-closed rather than spawn with an unbounded fd set.
+     * This is the most fundamental fact about commit here, independent of the
+     * handle; error() is NORETURN, so nothing below runs (the receipt is never
+     * touched and the finalizer leaves the intent open). Callers can discover
+     * the refusal up front via effect_session_commit_supported(). */
+    error("effect commit is unavailable on this platform: no atomic "
+          "close-on-exec primitive to bound the child's inherited descriptors");
+#endif
     runix_effect_session *s = es_from_handle(handle_);
     if (s->state != ES_OPENED) {
         error("effect session is not open for commit");
@@ -1353,6 +1317,18 @@ SEXP effect_session_testing(void) {
 #endif
 }
 
+/* Whether the commit path is supported on this build/platform: TRUE only when
+ * the atomic child-side fd-close primitive is present. When FALSE,
+ * effect_session_commit refuses fail-closed. Lets a caller (and the coming
+ * effect-capability gate) discover the refusal without minting a receipt. */
+SEXP effect_session_commit_supported(void) {
+#ifdef RUNIX_HAVE_CLOSEFROM_NP
+    return ScalarLogical(TRUE);
+#else
+    return ScalarLogical(FALSE);
+#endif
+}
+
 #else /* not __linux__: the effect session is Linux-only */
 
 SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
@@ -1391,6 +1367,10 @@ SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
 
 SEXP effect_session_testing(void) {
     return ScalarLogical(FALSE);
+}
+
+SEXP effect_session_commit_supported(void) {
+    return ScalarLogical(FALSE); /* the effect session is Linux-only */
 }
 
 #endif

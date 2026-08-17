@@ -66,11 +66,12 @@
     undelivered receipt whose child nonetheless returns a valid, correlation-id
     matching result (a guessed or replayed id) is classified effect-UNKNOWN, not
     trusted.
-  - The fd-hygiene invariant no longer degrades to inheritance on glibc < 2.34:
-    `es_cloexec_from()` is a real fallback that marks every inherited fd >= 3
-    close-on-exec in the parent (via `/proc/self/fd`, or the full
-    `RLIMIT_NOFILE` range if `/proc` is absent), holding the same "nothing
-    leaks" guarantee as `addclosefrom_np`.
+  - The fd-hygiene invariant is held only by the ATOMIC in-child close
+    primitive (`addclosefrom_np`), never a racy parent-side sweep: on a platform
+    without it the commit path is refused fail-closed rather than spawned with
+    an unbounded fd set. A new `effect_session_commit_supported()` reports
+    whether commit is available so a caller (and the coming effect-capability
+    gate) can discover the refusal without minting a receipt.
   - Every native string input is rejected if it carries an embedded NUL
     (byte-length != C-string length) before validation or serialization, so a
     hand-built `CHARSXP` cannot be truncated silently. (Ordinary R construction

@@ -61,3 +61,11 @@
 .effect_session_testing <- function() {
     .Call(C_effect_session_testing)
 }
+
+## TRUE only when the commit path is supported on this build/platform (an atomic
+## child-side fd-close primitive is present). When FALSE, .effect_session_commit
+## refuses fail-closed rather than risk leaking descriptors to the privileged
+## helper. The coming effect-capability gate keys on this.
+.effect_session_commit_supported <- function() {
+    .Call(C_effect_session_commit_supported)
+}

@@ -781,6 +781,8 @@ static const R_CallMethodDef rab_call_methods[] = {
     {"effect_session_write_outcome", (DL_FUNC) &effect_session_write_outcome, 3},
     {"effect_session_state", (DL_FUNC) &effect_session_state, 1},
     {"effect_session_testing", (DL_FUNC) &effect_session_testing, 0},
+    {"effect_session_commit_supported",
+     (DL_FUNC) &effect_session_commit_supported, 0},
     {NULL, NULL, 0}};
 
 void R_init_runix(DllInfo *dll) {

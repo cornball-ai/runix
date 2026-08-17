@@ -70,5 +70,6 @@ SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
 SEXP effect_session_write_outcome(SEXP handle_, SEXP record_, SEXP deadlines_);
 SEXP effect_session_state(SEXP handle_);
 SEXP effect_session_testing(void);
+SEXP effect_session_commit_supported(void);
 
 #endif /* RUNIX_RAB_INTERNAL_H */

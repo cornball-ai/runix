@@ -46,6 +46,18 @@ if (is_linux) {
                  "not a runix effect session handle")
     expect_error(runix:::.effect_session_state(1L),
                  "not a runix effect session handle")
+
+    ## ---- commit-path availability (re-review Finding: fail-closed) ---------
+    ## When the atomic child-side fd-close primitive is absent
+    ## (-DRUNIX_NO_CLOSEFROM_NP), commit is refused fail-closed rather than
+    ## spawned with an unbounded fd set. The platform guard is the FIRST thing
+    ## commit does, so the refusal is checkable with any argument (no session).
+    ## This build has the primitive, so the branch is skipped here; it fires in a
+    ## no-primitive build's suite.
+    if (!runix:::.effect_session_commit_supported()) {
+        expect_error(runix:::.effect_session_commit("not a handle", "nginx"),
+                     "unavailable on this platform")
+    }
 }
 
 ## ---- fake broker: open / write_outcome / state / commit ------------------
@@ -277,8 +289,13 @@ if (is_linux && tinytest::at_home() &&
                            "RUNIX_TEST_ARGV_DUMP", "RUNIX_TEST_RESULT",
                            "RUNIX_TEST_EXIT", "RUNIX_TEST_SLEEP",
                            "RUNIX_TEST_SENTINEL_PATH", "RUNIX_TEST_SENTINEL_DUMP",
-                           "RUNIX_TEST_FORCE_UNDELIVERED",
-                           "RUNIX_TEST_FORCE_CLOEXEC_SWEEP")), add = TRUE)
+                           "RUNIX_TEST_FORCE_UNDELIVERED")), add = TRUE)
+
+    ## precondition: this build supports the commit path (an atomic fd-close
+    ## primitive is present). The commit tests below assume it; a build without
+    ## it (-DRUNIX_NO_CLOSEFROM_NP) refuses commit fail-closed and is exercised
+    ## separately.
+    expect_true(runix:::.effect_session_commit_supported())
 
     result_ok <- runix:::encode_json_line(list(
         status = "ok", effect_issued = TRUE, correlation_id = cid, detail = ""))
@@ -303,11 +320,10 @@ if (is_linux && tinytest::at_home() &&
         frame_json(open_ok_effect), # 7  s7 open (held status, exit 1 -> ok/held)
         frame_json(open_ok_effect), # 8  s8 open (sleep past deadline -> unknown)
         frame_json(open_ok_effect), # 9  sund open (undelivered -> unknown)
-        frame_json(open_ok_effect), # 10 sfd open (fd hygiene: closefrom path)
-        frame_json(open_ok_effect), # 11 sfd2 open (fd hygiene: sweep fallback)
-        frame_json(open_ok_effect), # 12 s4 open (bad entrypoint -> spawn_failed)
-        frame_json(open_ok_effect), # 13 s_ins open (install: input-bound errors)
-        frame_json(open_ok_effect)  # 14 s_upd open (update: arity error)
+        frame_json(open_ok_effect), # 10 sfd open (fd hygiene: closefrom primitive)
+        frame_json(open_ok_effect), # 11 s4 open (bad entrypoint -> spawn_failed)
+        frame_json(open_ok_effect), # 12 s_ins open (install: input-bound errors)
+        frame_json(open_ok_effect)  # 13 s_upd open (update: arity error)
     ), read_first = TRUE))
     copen <- function(operation = "apt.install", resource = "nginx") {
         r <- list(status = "unavailable")
@@ -431,8 +447,8 @@ if (is_linux && tinytest::at_home() &&
     ## child. R's own file-connection fds are NOT close-on-exec, so an open
     ## connection is a genuine leak sentinel. Assert (precondition) it really is
     ## non-CLOEXEC in the parent -- else the check would pass vacuously -- then
-    ## assert the child never sees it, once via the in-child closefrom primitive
-    ## and once via the parent-side CLOEXEC sweep fallback (forced on).
+    ## assert the child never sees it, via the atomic in-child closefrom
+    ## primitive (the only fd-close strategy the commit path now uses).
     sentinel_path <- tempfile("leak-sentinel-")
     sentinel_con <- file(sentinel_path, open = "wb")
     O_CLOEXEC <- strtoi("2000000", base = 8L) # 02000000 octal
@@ -454,23 +470,12 @@ if (is_linux && tinytest::at_home() &&
                RUNIX_TEST_SENTINEL_DUMP = sentinel_dump)
     Sys.unsetenv("RUNIX_TEST_EXIT")
 
-    ## (a) the in-child closefrom primitive (default on glibc 2.34+)
     sfd <- copen()
     cfd <- runix:::.effect_session_commit(sfd$handle, packages = "nginx",
         deadline_ms = 5000L)
     expect_equal(cfd$session_status, "ok")
     leaked <- if (file.exists(sentinel_dump)) readLines(sentinel_dump) else character()
     expect_false(any(grepl("LEAKED", leaked)))
-
-    ## (b) the parent-side CLOEXEC sweep fallback, forced on
-    Sys.setenv(RUNIX_TEST_FORCE_CLOEXEC_SWEEP = "1")
-    sfd2 <- copen()
-    cfd2 <- runix:::.effect_session_commit(sfd2$handle, packages = "nginx",
-        deadline_ms = 5000L)
-    expect_equal(cfd2$session_status, "ok")
-    leaked2 <- if (file.exists(sentinel_dump)) readLines(sentinel_dump) else character()
-    expect_false(any(grepl("LEAKED", leaked2)))
-    Sys.unsetenv("RUNIX_TEST_FORCE_CLOEXEC_SWEEP")
     close(sentinel_con)
     Sys.unsetenv(c("RUNIX_TEST_SENTINEL_PATH", "RUNIX_TEST_SENTINEL_DUMP"))
 
