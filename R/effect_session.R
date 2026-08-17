@@ -17,12 +17,14 @@
 ## one of unavailable/unsupported/timeout/io/bad_response/untrusted_peer/
 ## bad_request/broker_error (detail carries the broker error code or the
 ## offending field). The receipt and binding never appear in the result.
-.effect_session_open <- function(socket_path, operation, resource, plan_schema,
-                                 plan_hash, connect_ms = 2000L, recv_ms = 5000L,
-                                 send_ms = 5000L, expected_uid = 0L) {
+.effect_session_open <- function(socket_path, operation, resource,
+                                 plan_schema, plan_hash, connect_ms = 2000L,
+                                 recv_ms = 5000L, send_ms = 5000L,
+                                 expected_uid = 0L) {
     .Call(C_effect_session_open, socket_path, operation, resource,
           as.integer(plan_schema), plan_hash,
-          as.integer(c(connect_ms, recv_ms, send_ms)), as.integer(expected_uid))
+          as.integer(c(connect_ms, recv_ms, send_ms)),
+          as.integer(expected_uid))
 }
 
 ## Close the intent with the C-held outcome binding. `record` is the outcome
@@ -31,7 +33,7 @@
 ## detail = <chr|NA>); the binding is spent and wiped by the attempt regardless
 ## of the result, moving the session to closed.
 .effect_session_write_outcome <- function(handle, record, connect_ms = 2000L,
-                                          recv_ms = 5000L, send_ms = 5000L) {
+    recv_ms = 5000L, send_ms = 5000L) {
     .Call(C_effect_session_write_outcome, handle, encode_json_line(record),
           as.integer(c(connect_ms, recv_ms, send_ms)))
 }
