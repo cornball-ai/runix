@@ -1,11 +1,11 @@
 # pkgops: the unprivileged apt-mutation issuer (plan)
 
-**Status: plan only, and NOT approved. No code until this plan is signed off.** This
-document is the central review artifact for the second-and-final unit of the
-apt-mutation arc; it spans runix, pkgexec, runix-audit-broker, and pkgstate, and
-reaches rctl at the end. The `pkgops` repo is not created until this plan is accepted.
-It aligns with the merged `apt-mutation-boundary-contract.md` (authorization,
-interactive vs machine mode) and `libapt-pkg-helper-plan.md` (the effector boundary).
+**Status: approved 2026-08-17.** Build sequence, concrete signatures, and the review
+rulings live in the companion `pkgops-implementation-plan.md`. This document is the
+central contract for the second-and-final unit of the apt-mutation arc; it spans runix,
+pkgexec, runix-audit-broker, and pkgstate, and reaches rctl at the end. It aligns with the
+merged `apt-mutation-boundary-contract.md` (authorization, interactive vs machine mode) and
+`libapt-pkg-helper-plan.md` (the effector boundary).
 
 ## 1. What pkgops is, and is not
 
@@ -221,10 +221,14 @@ the digest record types (so the preview shows exactly what the hash bound):
 
 | verb family | record fields |
 |---|---|
-| transaction | `package, architecture, action, from_version, to_version, flags, owned, protected, held` |
+| transaction | `package, architecture, action, from_version, to_version, flags[]` (flags ⊆ `hold, auto, essential, protected`; there are **no** separate `owned`/`protected`/`held` fields, and no `owned` flag) |
 | hold / unhold | `package, from_state, to_state` |
-| configure | `package, architecture, current_version, dpkg_state` |
+| configure | `package, architecture, current_version, state` |
 | update | `uri, suite, components[], options{}` (identity-relevant options) |
+
+(Grammar corrected 2026-08-17 against shipped pkgexec 0.0.3: configure's field is `state`,
+not `dpkg_state`; transaction carries a `flags[]` array, not separate `owned`/`protected`/
+`held` fields — `pkgexec` `digest.h:32-41`, `preview.cc:146-165`.)
 
 It is inert data; holding one grants nothing.
 
