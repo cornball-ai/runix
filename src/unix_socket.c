@@ -155,6 +155,9 @@ int rab_write_all(int fd, const unsigned char *buf, size_t n, long long dl) {
             }
             return -1;
         }
+        if (k == 0) {
+            return -1; /* no forward progress on a positive count: treat as I/O */
+        }
         off += (size_t) k;
     }
     return 0;
@@ -764,7 +767,7 @@ static const R_CallMethodDef rab_call_methods[] = {
     {"rab_test_serve_once", (DL_FUNC) &C_rab_test_serve_once, 4},
     {"rab_test_serve_seq", (DL_FUNC) &C_rab_test_serve_seq, 3},
     /* native effect session (effect_session.c) */
-    {"effect_session_open", (DL_FUNC) &effect_session_open, 7},
+    {"effect_session_open", (DL_FUNC) &effect_session_open, 6},
     {"effect_session_commit", (DL_FUNC) &effect_session_commit, 4},
     {"effect_session_write_outcome", (DL_FUNC) &effect_session_write_outcome, 3},
     {"effect_session_state", (DL_FUNC) &effect_session_state, 1},

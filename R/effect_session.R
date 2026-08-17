@@ -19,12 +19,10 @@
 ## offending field). The receipt and binding never appear in the result.
 .effect_session_open <- function(socket_path, operation, resource,
                                  plan_schema, plan_hash, connect_ms = 2000L,
-                                 recv_ms = 5000L, send_ms = 5000L,
-                                 expected_uid = 0L) {
+                                 recv_ms = 5000L, send_ms = 5000L) {
     .Call(C_effect_session_open, socket_path, operation, resource,
           as.integer(plan_schema), plan_hash,
-          as.integer(c(connect_ms, recv_ms, send_ms)),
-          as.integer(expected_uid))
+          as.integer(c(connect_ms, recv_ms, send_ms)))
 }
 
 ## Close the intent with the C-held outcome binding. `record` is the outcome

@@ -39,6 +39,28 @@
   result). The fake-entrypoint test seam is compile-time only
   (`-DRUNIX_TESTING`), ABSENT from the production build: no runtime environment
   variable can redirect the production pkexec target.
+- Commit-path hardening (review of the C3 core):
+  - The broker peer uid the transport authenticates is now PINNED to root (0)
+    in the shipped build; it is no longer an R argument. Only a
+    `-DRUNIX_TESTING` build reads `RUNIX_TEST_PEER_UID`, so nothing R passes can
+    lower the authentication bar on the production path.
+  - The pkexec entrypoint's bounded request grammar (package count <= 256,
+    Debian-name pattern, per-verb arity, duplicate refusal, 64 KiB body cap) is
+    enforced in C BEFORE the single-use receipt is spent -- a list the helper
+    would reject never costs a receipt.
+  - The receipt is delivered to the child only with `SIGPIPE` ignored and a
+    usable deadline; if that guard cannot be established the write is refused and
+    the effect is left UNKNOWN, never risking a signal-kill of the R process.
+    Every `posix_spawn_file_actions_*` return is checked (a bad dup2/close aborts
+    before spawn), and all inherited descriptors >= 3 are closed in the child
+    (`addclosefrom_np`, glibc 2.34+).
+  - A result whose `detail` exceeds 128 bytes, or whose exit code contradicts its
+    status (exit 0 iff `ok`/`no_op`), is rejected as malformed and classified
+    effect-UNKNOWN rather than trusted or truncated.
+  - A commit that overruns its deadline `SIGKILL`s pkexec but classifies the
+    outcome as effect-UNKNOWN: the privileged apt work runs in a separate polkit
+    scope that killing pkexec need not stop, so a late-completing mutation must
+    never be read as "did not run".
 
 # runix 0.0.1.10
 

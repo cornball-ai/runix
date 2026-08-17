@@ -48,7 +48,13 @@ if (is_linux) {
                  "not a runix effect session handle")
 }
 
-## ---- fake broker: open / write_outcome / state (Linux + parallel) --------
+## ---- fake broker: open / write_outcome / state / commit ------------------
+## The broker peer uid the transport authenticates is PINNED to root (0) in the
+## production build; a testing build (-DRUNIX_TESTING) reads RUNIX_TEST_PEER_UID
+## so an unprivileged fake broker can be exercised. There is no R-facing knob.
+## Consequently: the production build can only prove the PINNING (a non-root
+## broker is refused), while the full open/write_outcome/commit flow runs in the
+## testing build against a fake broker owned by this user.
 if (is_linux && tinytest::at_home() &&
     requireNamespace("parallel", quietly = TRUE)) {
 
@@ -82,12 +88,6 @@ if (is_linux && tinytest::at_home() &&
         ok = TRUE, persisted = TRUE, audit_scope = "system",
         correlation_id = cid, binding = binding, effect_receipt = receipt))
     outcome_ok <- runix:::encode_json_line(list(ok = TRUE, persisted = TRUE))
-
-    ## ONE long-lived broker answers EVERY connection this test makes, in order,
-    ## modelling a real broker (one path, many requests). This deliberately
-    ## avoids forking a fresh server per exchange: under the test harness,
-    ## mcparallel fork latency degrades after several forks and a late-binding
-    ## server misses its client. The reply order below is the connection order.
     err_schema <- runix:::encode_json_line(list(
         ok = FALSE, error = "schema_invalid", message = "bad record"))
     err_madeup <- runix:::encode_json_line(list(
@@ -102,6 +102,47 @@ if (is_linux && tinytest::at_home() &&
         ok = TRUE, persisted = TRUE, audit_scope = "process",
         correlation_id = cid, binding = binding, effect_receipt = receipt))
 
+    ## ---- PRODUCTION build: uid-0 pinning refuses a non-root broker --------
+    ## The shipped build pins the peer to root; a fake broker owned by this
+    ## (unprivileged) user is refused as untrusted BEFORE any request byte is
+    ## sent. This is the Finding-1 regression: nothing R passes can lower the
+    ## bar. Skip when running as root -- then a root broker is legitimately
+    ## accepted and refusal cannot be demonstrated.
+    if (!runix:::.effect_session_testing() && myuid != 0L) {
+        psock <- tempfile("fake-es-pin-")
+        pbroker <- parallel::mcparallel(runix:::.broker_test_serve_seq(
+            psock, list(frame_json(open_ok_effect)), read_first = TRUE))
+        pr <- list(status = "unavailable")
+        for (attempt in 1:600) {
+            if (file.exists(psock)) {
+                pr <- runix:::.effect_session_open(psock, "apt.install", "nginx",
+                    1L, plan_hash, connect_ms = 500L)
+                if (!identical(pr$status, "unavailable")) break
+            }
+            Sys.sleep(0.02)
+        }
+        parallel::mccollect(pbroker)
+        expect_equal(pr$status, "untrusted_peer")
+        expect_null(pr$handle)
+    }
+
+    ## ---- TESTING build: full open / write_outcome / state flow ------------
+    if (runix:::.effect_session_testing()) {
+    old_peer <- Sys.getenv("RUNIX_TEST_PEER_UID", unset = NA)
+    Sys.setenv(RUNIX_TEST_PEER_UID = myuid)
+    on.exit({
+        if (is.na(old_peer)) {
+            Sys.unsetenv("RUNIX_TEST_PEER_UID")
+        } else {
+            Sys.setenv(RUNIX_TEST_PEER_UID = old_peer)
+        }
+    }, add = TRUE)
+
+    ## ONE long-lived broker answers EVERY connection this test makes, in order,
+    ## modelling a real broker (one path, many requests). This deliberately
+    ## avoids forking a fresh server per exchange: under the test harness,
+    ## mcparallel fork latency degrades after several forks and a late-binding
+    ## server misses its client. The reply order below is the connection order.
     sock <- tempfile("fake-es-")
     replies <- list(
         frame_json(open_ok_effect), # conn 1: open -> success (res)
@@ -125,7 +166,7 @@ if (is_linux && tinytest::at_home() &&
         for (attempt in 1:600) {
             if (file.exists(sock)) {
                 r <- runix:::.effect_session_open(sock, "apt.install", "nginx",
-                    1L, plan_hash, expected_uid = myuid)
+                    1L, plan_hash)
                 if (!identical(r$status, "unavailable")) break
             }
             Sys.sleep(0.02)
@@ -208,110 +249,196 @@ if (is_linux && tinytest::at_home() &&
                  "already written")
 
     ## --- commit: the pkexec-entrypoint spawn (compile-time seam only) -------
-    ## The production build spawns pkexec + the immutable entrypoint; only a
-    ## -DRUNIX_TESTING build substitutes a fake entrypoint (via
-    ## RUNIX_TEST_ENTRYPOINT), so these run there and skip otherwise.
-    if (runix:::.effect_session_testing()) {
-        ## a fake entrypoint: dump the stdin request (which carries the receipt)
-        ## and argv (the entrypoint path), then emit a chosen result on stdout
-        ## and exit with a chosen code -- mimicking the real fd protocol.
-        fake <- tempfile("fake-entry-", fileext = ".sh")
-        writeLines(c(
-            "#!/bin/sh",
-            "cat > \"$RUNIX_TEST_REQ_DUMP\"",
-            "printf '%s\\n' \"$@\" > \"$RUNIX_TEST_ARGV_DUMP\"",
-            "[ -n \"$RUNIX_TEST_RESULT\" ] && printf '%s' \"$RUNIX_TEST_RESULT\"",
-            "exit \"${RUNIX_TEST_EXIT:-0}\""), fake)
-        Sys.chmod(fake, "0755")
-        req_dump <- tempfile("req-")
-        argv_dump <- tempfile("argv-")
-        Sys.setenv(RUNIX_TEST_ENTRYPOINT = fake, RUNIX_TEST_REQ_DUMP = req_dump,
-                   RUNIX_TEST_ARGV_DUMP = argv_dump)
-        on.exit(Sys.unsetenv(c("RUNIX_TEST_ENTRYPOINT", "RUNIX_TEST_REQ_DUMP",
-                               "RUNIX_TEST_ARGV_DUMP", "RUNIX_TEST_RESULT",
-                               "RUNIX_TEST_EXIT")), add = TRUE)
+    ## a fake entrypoint: dump the stdin request (which carries the receipt) and
+    ## argv (the entrypoint path), optionally sleep (to force a read timeout),
+    ## then emit a chosen result on stdout and exit with a chosen code --
+    ## mimicking the real fd protocol.
+    fake <- tempfile("fake-entry-", fileext = ".sh")
+    writeLines(c(
+        "#!/bin/sh",
+        "cat > \"$RUNIX_TEST_REQ_DUMP\"",
+        "printf '%s\\n' \"$@\" > \"$RUNIX_TEST_ARGV_DUMP\"",
+        "[ -n \"$RUNIX_TEST_SLEEP\" ] && sleep \"$RUNIX_TEST_SLEEP\"",
+        "[ -n \"$RUNIX_TEST_RESULT\" ] && printf '%s' \"$RUNIX_TEST_RESULT\"",
+        "exit \"${RUNIX_TEST_EXIT:-0}\""), fake)
+    Sys.chmod(fake, "0755")
+    req_dump <- tempfile("req-")
+    argv_dump <- tempfile("argv-")
+    Sys.setenv(RUNIX_TEST_ENTRYPOINT = fake, RUNIX_TEST_REQ_DUMP = req_dump,
+               RUNIX_TEST_ARGV_DUMP = argv_dump)
+    on.exit(Sys.unsetenv(c("RUNIX_TEST_ENTRYPOINT", "RUNIX_TEST_REQ_DUMP",
+                           "RUNIX_TEST_ARGV_DUMP", "RUNIX_TEST_RESULT",
+                           "RUNIX_TEST_EXIT", "RUNIX_TEST_SLEEP")), add = TRUE)
 
-        csock <- tempfile("fake-es-c")
-        result_ok <- runix:::encode_json_line(list(
-            status = "ok", effect_issued = TRUE, correlation_id = cid,
-            detail = ""))
-        cbroker <- parallel::mcparallel(runix:::.broker_test_serve_seq(csock,
-            list(frame_json(open_ok_effect), frame_json(outcome_ok),
-                 frame_json(open_ok_effect), frame_json(open_ok_effect),
-                 frame_json(open_ok_effect)), read_first = TRUE))
-        copen <- function() {
-            r <- list(status = "unavailable")
-            for (a in 1:600) {
-                if (file.exists(csock)) {
-                    r <- runix:::.effect_session_open(csock, "apt.install",
-                        "nginx", 1L, plan_hash, expected_uid = myuid)
-                    if (!identical(r$status, "unavailable")) break
-                }
-                Sys.sleep(0.02)
+    result_ok <- runix:::encode_json_line(list(
+        status = "ok", effect_issued = TRUE, correlation_id = cid, detail = ""))
+    result_held <- runix:::encode_json_line(list(
+        status = "held", effect_issued = FALSE, correlation_id = cid,
+        detail = "held back"))
+    result_long <- runix:::encode_json_line(list(
+        status = "ok", effect_issued = TRUE, correlation_id = cid,
+        detail = strrep("d", 200)))       # detail > 128: a malformed result
+
+    csock <- tempfile("fake-es-c")
+    ## connection order below == reply order; every open consumes one reply,
+    ## every write_outcome one; a commit uses the fake entrypoint, not the broker;
+    ## a commit rejected during input validation consumes nothing.
+    cbroker <- parallel::mcparallel(runix:::.broker_test_serve_seq(csock, list(
+        frame_json(open_ok_effect), # 1  s1 open (happy)
+        frame_json(outcome_ok),     # 2  s1 write_outcome
+        frame_json(open_ok_effect), # 3  s2 open (empty result -> unknown)
+        frame_json(open_ok_effect), # 4  s3 open (exit 127 -> unauthorized)
+        frame_json(open_ok_effect), # 5  s5 open (detail > 128 -> unknown)
+        frame_json(open_ok_effect), # 6  s6 open (ok status, exit 1 -> unknown)
+        frame_json(open_ok_effect), # 7  s7 open (held status, exit 1 -> ok/held)
+        frame_json(open_ok_effect), # 8  s8 open (sleep past deadline -> unknown)
+        frame_json(open_ok_effect), # 9  s4 open (bad entrypoint -> spawn_failed)
+        frame_json(open_ok_effect), # 10 s_ins open (install: input-bound errors)
+        frame_json(open_ok_effect)  # 11 s_upd open (update: arity error)
+    ), read_first = TRUE))
+    copen <- function(operation = "apt.install", resource = "nginx") {
+        r <- list(status = "unavailable")
+        for (a in 1:600) {
+            if (file.exists(csock)) {
+                r <- runix:::.effect_session_open(csock, operation, resource,
+                    1L, plan_hash)
+                if (!identical(r$status, "unavailable")) break
             }
-            r
+            Sys.sleep(0.02)
         }
+        r
+    }
 
-        ## happy path: the helper reports ok with effect_issued = TRUE
-        Sys.setenv(RUNIX_TEST_RESULT = result_ok)
-        Sys.unsetenv("RUNIX_TEST_EXIT")
-        s1 <- copen()
-        expect_equal(s1$status, "ok")
-        c1 <- runix:::.effect_session_commit(s1$handle, packages = "nginx",
-            lock_timeout = 30L, deadline_ms = 5000L)
-        expect_equal(c1$session_status, "ok")
-        expect_equal(c1$status, "ok")
-        expect_true(isTRUE(c1$effect_issued))
-        expect_equal(c1$correlation_id, cid)
+    ## happy path: the helper reports ok with effect_issued = TRUE
+    Sys.setenv(RUNIX_TEST_RESULT = result_ok)
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+    s1 <- copen()
+    expect_equal(s1$status, "ok")
+    c1 <- runix:::.effect_session_commit(s1$handle, packages = "nginx",
+        lock_timeout = 30L, deadline_ms = 5000L)
+    expect_equal(c1$session_status, "ok")
+    expect_equal(c1$status, "ok")
+    expect_true(isTRUE(c1$effect_issued))
+    expect_equal(c1$correlation_id, cid)
 
-        ## the receipt was DELIVERED to the child (its request dump has it) and
-        ## the exact contracted request fields are present
-        reqbytes <- readChar(req_dump, file.info(req_dump)$size, useBytes = TRUE)
-        expect_true(grepl(receipt, reqbytes, fixed = TRUE))
-        expect_true(grepl("\"correlation_id\":\"", reqbytes, fixed = TRUE))
-        expect_true(grepl("\"plan_schema\":1", reqbytes, fixed = TRUE))
-        expect_true(grepl("\"lock_timeout\":30", reqbytes, fixed = TRUE))
-        expect_true(grepl("\"nginx\"", reqbytes, fixed = TRUE))
-        ## and it was WIPED from the session after delivery
-        st_c <- runix:::.effect_session_state(s1$handle)
-        expect_equal(st_c$state, "result_known")
-        expect_false(st_c$has_receipt)
-        ## the verb mapped to its immutable entrypoint path (no path from R)
-        expect_true(any(grepl("/usr/libexec/pkgexec/runix-apt-install",
-                              readLines(argv_dump), fixed = TRUE)))
-        ## the outcome still closes over the broker (conn 2)
-        wo1 <- runix:::.effect_session_write_outcome(s1$handle,
-            list(outcome = "ok", effect_issued = TRUE))
-        expect_equal(wo1$status, "ok")
+    ## the receipt was DELIVERED to the child (its request dump has it) and the
+    ## exact contracted request fields are present
+    reqbytes <- readChar(req_dump, file.info(req_dump)$size, useBytes = TRUE)
+    expect_true(grepl(receipt, reqbytes, fixed = TRUE))
+    expect_true(grepl("\"correlation_id\":\"", reqbytes, fixed = TRUE))
+    expect_true(grepl("\"plan_schema\":1", reqbytes, fixed = TRUE))
+    expect_true(grepl("\"lock_timeout\":30", reqbytes, fixed = TRUE))
+    expect_true(grepl("\"nginx\"", reqbytes, fixed = TRUE))
+    ## and it was WIPED from the session after delivery
+    st_c <- runix:::.effect_session_state(s1$handle)
+    expect_equal(st_c$state, "result_known")
+    expect_false(st_c$has_receipt)
+    ## the verb mapped to its immutable entrypoint path (no path from R)
+    expect_true(any(grepl("/usr/libexec/pkgexec/runix-apt-install",
+                          readLines(argv_dump), fixed = TRUE)))
+    ## the outcome still closes over the broker (conn 2)
+    wo1 <- runix:::.effect_session_write_outcome(s1$handle,
+        list(outcome = "ok", effect_issued = TRUE))
+    expect_equal(wo1$status, "ok")
 
-        ## a child that runs but emits no valid result: the effect is UNKNOWN
-        Sys.setenv(RUNIX_TEST_RESULT = "")
-        Sys.unsetenv("RUNIX_TEST_EXIT")
-        s2 <- copen()
-        c2 <- runix:::.effect_session_commit(s2$handle, packages = "nginx",
-            deadline_ms = 5000L)
-        expect_equal(c2$session_status, "effect_unknown")
-        expect_true(is.na(c2$effect_issued))
-        expect_equal(runix:::.effect_session_state(s2$handle)$state,
-                     "effect_unknown")
+    ## a child that runs but emits no valid result: the effect is UNKNOWN
+    Sys.setenv(RUNIX_TEST_RESULT = "")
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+    s2 <- copen()
+    c2 <- runix:::.effect_session_commit(s2$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(c2$session_status, "effect_unknown")
+    expect_true(is.na(c2$effect_issued))
+    expect_equal(runix:::.effect_session_state(s2$handle)$state, "effect_unknown")
 
-        ## pkexec-style denial (exit 127, no result): unauthorized, no effect
-        Sys.setenv(RUNIX_TEST_RESULT = "", RUNIX_TEST_EXIT = "127")
-        s3 <- copen()
-        c3 <- runix:::.effect_session_commit(s3$handle, packages = "nginx",
-            deadline_ms = 5000L)
-        expect_equal(c3$session_status, "unauthorized")
-        expect_equal(c3$effect_issued, FALSE)
+    ## pkexec-style denial (exit 127, no result): unauthorized, no effect
+    Sys.setenv(RUNIX_TEST_RESULT = "", RUNIX_TEST_EXIT = "127")
+    s3 <- copen()
+    c3 <- runix:::.effect_session_commit(s3$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(c3$session_status, "unauthorized")
+    expect_equal(c3$effect_issued, FALSE)
 
-        ## a spawn that never execs (nonexistent entrypoint): provably no effect
-        Sys.setenv(RUNIX_TEST_ENTRYPOINT = "/no/such/runix-entrypoint-xyzzy")
-        Sys.unsetenv("RUNIX_TEST_EXIT")
-        s4 <- copen()
-        c4 <- runix:::.effect_session_commit(s4$handle, packages = "nginx",
-            deadline_ms = 5000L)
-        expect_true(c4$session_status %in% c("spawn_failed", "unauthorized"))
-        expect_equal(c4$effect_issued, FALSE)
+    ## a result whose detail exceeds 128 bytes is malformed -> effect UNKNOWN
+    ## (Finding 4: the parser refuses to truncate an over-long detail)
+    Sys.setenv(RUNIX_TEST_RESULT = result_long)
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+    s5 <- copen()
+    c5 <- runix:::.effect_session_commit(s5$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(c5$session_status, "effect_unknown")
+    expect_true(is.na(c5$effect_issued))
 
-        parallel::mccollect(cbroker)
+    ## an ok status with a NONZERO exit is a protocol violation -> UNKNOWN
+    ## (Finding 4: exit code and status must agree; exit 0 iff ok/no_op)
+    Sys.setenv(RUNIX_TEST_RESULT = result_ok, RUNIX_TEST_EXIT = "1")
+    s6 <- copen()
+    c6 <- runix:::.effect_session_commit(s6$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(c6$session_status, "effect_unknown")
+    expect_true(is.na(c6$effect_issued))
+
+    ## a non-ok status (held) WITH a nonzero exit is consistent and trusted:
+    ## the helper's status and effect_issued rule
+    Sys.setenv(RUNIX_TEST_RESULT = result_held, RUNIX_TEST_EXIT = "1")
+    s7 <- copen()
+    c7 <- runix:::.effect_session_commit(s7$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_equal(c7$session_status, "ok")
+    expect_equal(c7$status, "held")
+    expect_equal(c7$effect_issued, FALSE)
+    expect_equal(c7$detail, "held back")
+
+    ## the child overruns the deadline (sleeps, emits nothing): SIGKILL and a
+    ## genuinely indeterminate outcome -> effect UNKNOWN, never "did not run"
+    ## (Finding 8: a late-completing privileged mutation is not a failure)
+    Sys.setenv(RUNIX_TEST_RESULT = "", RUNIX_TEST_SLEEP = "3")
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+    s8 <- copen()
+    c8 <- runix:::.effect_session_commit(s8$handle, packages = "nginx",
+        deadline_ms = 300L)
+    expect_equal(c8$session_status, "effect_unknown")
+    expect_true(is.na(c8$effect_issued))
+    Sys.unsetenv("RUNIX_TEST_SLEEP")
+
+    ## a spawn that never execs (nonexistent entrypoint): provably no effect
+    Sys.setenv(RUNIX_TEST_ENTRYPOINT = "/no/such/runix-entrypoint-xyzzy")
+    Sys.unsetenv("RUNIX_TEST_EXIT")
+    s4 <- copen()
+    c4 <- runix:::.effect_session_commit(s4$handle, packages = "nginx",
+        deadline_ms = 5000L)
+    expect_true(c4$session_status %in% c("spawn_failed", "unauthorized"))
+    expect_equal(c4$effect_issued, FALSE)
+
+    ## --- Finding 5: the bounded request grammar is enforced BEFORE the
+    ## single-use receipt is spent. Each rejected commit errors while the session
+    ## stays OPENED (receipt still held), so ONE handle exercises them all.
+    s_ins <- copen()  # apt.install
+    expect_equal(runix:::.effect_session_state(s_ins$handle)$state, "opened")
+    ## no packages for a package-taking verb
+    expect_error(runix:::.effect_session_commit(s_ins$handle,
+        packages = character()), "at least one package")
+    ## an invalid name (uppercase), a leading dash (apt-option injection shape),
+    ## and a duplicate are each refused
+    expect_error(runix:::.effect_session_commit(s_ins$handle, packages = "Nginx"),
+                 "invalid package name")
+    expect_error(runix:::.effect_session_commit(s_ins$handle, packages = "-rf"),
+                 "invalid package name")
+    expect_error(runix:::.effect_session_commit(s_ins$handle,
+        packages = c("nginx", "nginx")), "duplicate package")
+    ## more than the entrypoint's cap of 256
+    expect_error(runix:::.effect_session_commit(s_ins$handle,
+        packages = paste0("pkg", seq_len(257))), "too many packages")
+    ## every rejection left the receipt intact and the session open
+    st_ins <- runix:::.effect_session_state(s_ins$handle)
+    expect_equal(st_ins$state, "opened")
+    expect_true(st_ins$has_receipt)
+
+    ## a package-free verb (apt.update) refuses any package list
+    s_upd <- copen(operation = "apt.update", resource = "system")
+    expect_error(runix:::.effect_session_commit(s_upd$handle, packages = "nginx"),
+                 "takes no packages")
+
+    parallel::mccollect(cbroker)
     }
 }

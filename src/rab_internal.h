@@ -64,8 +64,7 @@ int rab_read_all(int fd, unsigned char *buf, size_t n, long long dl);
  * Compiled and registered on every platform (real under __linux__, a typed
  * "unsupported" stub elsewhere). */
 SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
-                         SEXP plan_schema_, SEXP plan_hash_, SEXP deadlines_,
-                         SEXP expected_uid_);
+                         SEXP plan_schema_, SEXP plan_hash_, SEXP deadlines_);
 SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
                            SEXP deadline_ms_);
 SEXP effect_session_write_outcome(SEXP handle_, SEXP record_, SEXP deadlines_);
