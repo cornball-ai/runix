@@ -1,3 +1,24 @@
+# runix 0.0.1.12
+
+- The exported slice-2 effect-session surface (pkgops slice 2 complete), over
+  the native C core:
+  - `effect_capability(socket_path, plan_schema)` negotiates the broker's
+    effect-receipt extension and plan schema (the real compatibility gate on
+    top of `broker_available()`'s peer auth). Fail-closed to
+    `runix_capability_unavailable` on an absent extension, an unaccepted plan
+    schema, or an unreachable/untrusted broker; nothing is minted. The broker
+    peer is pinned to root.
+  - The three-call session API: `effect_session_open()` returns an opaque,
+    PID-bound handle object carrying only the external pointer and the
+    non-secret correlation id (never a receipt, binding, or path), and raises
+    the typed broker taxonomy on failure; `effect_session_commit()` returns the
+    helper's raw result verbatim (the issuer, not runix, maps the 12-status
+    vocabulary) and refuses fail-closed on a platform without the atomic
+    fd-close primitive; `effect_session_write_outcome()` validates the record
+    and returns the raw status. `print` methods show state/cid, never a secret.
+  - `runix_effect_conditions`: documents the effect-session condition taxonomy
+    (which subclasses runix raises versus the issuer) and the retryability rule.
+
 # runix 0.0.1.11
 
 - Native effect-session groundwork (pkgops slice 2). The broker C client
