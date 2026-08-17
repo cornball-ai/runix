@@ -142,9 +142,14 @@ ever crosses from R**.
 
 One-shot enforcement: each call checks `owner_pid == getpid()` (a `fork`ed or
 `unserialize`d handle mismatches → refuse) and the exact expected `state` (re-use → refuse).
-The verb→path map is the only source of entrypoint paths; a **test-only seam** (a compile
-guard / `RUNIX_ALLOW_TEST_ENTRYPOINT` env, mirroring the existing `RUNIX_ALLOW_TEST_SERVER`)
-substitutes the fake entrypoint for unit tests — production R can never name a path.
+The verb→path map is the only source of entrypoint paths; the fake entrypoint is
+substituted for unit tests through a **compile-time, test-binary-only seam** (`#ifdef
+RUNIX_TESTING`, absent from the production build). **No runtime environment variable may
+ever redirect the entrypoint** — a substitutable path that gets `exec`'d under `pkexec` is a
+root privilege-escalation surface, so the map is immutable in the shipped binary and
+production R can never name a path. (This is stricter than the broker's
+`RUNIX_ALLOW_TEST_SERVER` env seam, which only points at a fake *unprivileged* socket, never
+a root exec.)
 
 ### 3.4 Custody + hygiene rules (match-or-exceed the existing floor)
 - **The secret must never reach a RAWSXP.** Today `C_rab_broker_call` copies the whole
@@ -155,6 +160,14 @@ substitutes the fake entrypoint for unit tests — production R can never name a
   existing wrapper keeps its current behavior (copies the buffer to a RAWSXP for
   non-secret payloads); the session **parses and wipes the buffer before any R object is
   created**. One transport, two consumers, no duplicated socket code.
+- **The generic R wrapper must *refuse* effect-bearing requests — not merely avoid them.**
+  R can construct any request body, so an `open_intent` carrying an `effect` block could be
+  sent through `C_rab_broker_call`'s R wrapper (`.broker_call` / the broker sink's
+  `open_intent`) and come back with a receipt in a `RAWSXP`. The wrapper therefore
+  **fails closed on any request whose body carries `effect`** (`runix_effect_via_generic_path`),
+  so an effect-bearing intent is serviceable **only** through `effect_session_open`. This
+  positive guard is what makes "the receipt never reaches R" a property of the API rather
+  than a convention the caller could sidestep.
 - **Extraction is linked Jansson, in C — not a hand-rolled scanner** (ruling Q4). Runix
   already depends on strict JSON semantics; link `libjansson` directly so `effect_receipt`
   / `binding` / `correlation_id` are pulled with dup-key rejection, exact schema, and
@@ -266,14 +279,19 @@ Follows the contract's branched flow (§4). In order:
    commit vocabulary through the closed table in §4.4 → typed condition. Read
    `effect_issued` **from the helper's boolean**, authoritative (§4.4).
 6. `pkgstate` verification (§4.5) per resolved record (skipped only when the status made
-   no state claim).
+   no state claim). A verification **failure is captured into the outcome, not raised** — a
+   clean helper status with a disagreeing post-state is a failed outcome that still gets
+   written, never an exception that skips step 7.
 7. `runix::effect_session_write_outcome(handle, outcome)`.
-8. **Only now return or signal.** A strict, parseable failure status (`operation_failed`,
-   `dpkg_broken`, `no_intent`, …) is *known truth* and **must close the outcome first**
-   (contract §4.8): the order is always parse → verify → attempt outcome → *then*
-   return/signal the `pkgops_outcome`. Never raise on a failure status before step 7. The
-   intent is left open only for genuine effect-unknown (`runix_helper_bad_result`, process
-   death, persist failure).
+8. **Only now return or signal.** A strict parseable failure status (`operation_failed`,
+   `dpkg_broken`, `no_intent`, …) **and** a verification failure are both *known truth* that
+   **must close the outcome first** (contract §4.8): the order is always parse → verify →
+   **attempt outcome** → *then* return/signal the `pkgops_outcome`. **No R exception raised
+   in steps 5–6 may bypass the outcome attempt** — those steps run inside a handler that, on
+   any error, still attempts `write_outcome` in step 7 and only then re-signals the
+   condition. The intent is left open **only** for genuine effect-unknown
+   (`runix_helper_bad_result`, process death, or a failed outcome persist), never because a
+   parse/verify error short-circuited the close.
 
 The verb→entrypoint map (`/usr/libexec/pkgexec/runix-apt-<verb>`, `dist_upgrade` →
 `dist-upgrade` binary) lives in C (§3.4), not R.
@@ -402,6 +420,15 @@ All six sign-off questions are decided; recorded here so the slices inherit them
 - `pkgstate` is an `Imports` of pkgops (verification is mandatory), not a `Suggests` — §4.
 - runix-owned struct bounds (`RUNIX_APT_RES_CAP`, …), never pkgexec-private `PKGX_*` — §3.2.
 - Preview status mapping includes `dpkg_broken` — §4.2.
+
+### Review round 2 (PR #73)
+- The generic `C_rab_broker_call` R wrapper **rejects effect-bearing requests**
+  (`runix_effect_via_generic_path`), so a receipt can never return through the RAWSXP path —
+  it is not enough that the session avoids it — §3.4.
+- The fake-entrypoint seam is **compile-time / test-binary-only** (`#ifdef RUNIX_TESTING`);
+  **no runtime env var** may redirect a root-`exec`'d entrypoint path — §3.3.
+- A **verification failure** also closes the outcome first: steps 5–6 run inside a handler
+  so no parse/verify exception bypasses `write_outcome` — §4.3 steps 6, 8.
 
 ---
 
