@@ -53,5 +53,15 @@ if ! printf '#include <jansson.h>\n#if JANSSON_VERSION_HEX < %s\n#error too old\
   exit 1
 fi
 
+# Optional compile-time test seam: when RUNIX_TESTING is set at build time, the
+# effect-session commit substitutes a caller-named fake entrypoint (via
+# RUNIX_TEST_ENTRYPOINT) for the pkexec spawn, so the spawn/pipe/wipe/parse path
+# can be unit-tested without root. It is ABSENT from the default (production)
+# build -- no runtime env var can redirect the production pkexec target.
+if [ -n "$RUNIX_TESTING" ]; then
+  PKG_CFLAGS="$PKG_CFLAGS -DRUNIX_TESTING"
+  echo "runix: building WITH the -DRUNIX_TESTING commit seam (do not ship)"
+fi
+
 sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" src/Makevars.in > src/Makevars
 exit 0

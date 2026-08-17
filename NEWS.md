@@ -27,7 +27,18 @@
   dropped handle leaves the intent open (fail-closed). `.Call` entry points
   `effect_session_open`/`write_outcome`/`state`; the verb is a runix-owned
   closed enum mapped in C to the immutable pkexec entrypoint (no path crosses
-  from R). The commit path (posix_spawn of that entrypoint) lands next.
+  from R).
+- `effect_session_commit`: `posix_spawn` (no shell) of `pkexec` + this verb's
+  immutable entrypoint. The commit request (with the receipt) is delivered on
+  the child's stdin and `explicit_bzero`'d the instant it is sent; the strict
+  result (`{status, effect_issued, correlation_id, detail}`) is read from the
+  child's stdout under a wall-clock deadline (SIGKILL on overrun).
+  `effect_issued` is the helper's authoritative boolean, `FALSE` only when the
+  effect provably did not run (spawn failed, or pkexec denied before exec), and
+  `NA` only when it is genuinely unknown (the child ran but produced no valid
+  result). The fake-entrypoint test seam is compile-time only
+  (`-DRUNIX_TESTING`), ABSENT from the production build: no runtime environment
+  variable can redirect the production pkexec target.
 
 # runix 0.0.1.10
 

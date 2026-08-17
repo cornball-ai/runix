@@ -765,8 +765,10 @@ static const R_CallMethodDef rab_call_methods[] = {
     {"rab_test_serve_seq", (DL_FUNC) &C_rab_test_serve_seq, 3},
     /* native effect session (effect_session.c) */
     {"effect_session_open", (DL_FUNC) &effect_session_open, 7},
+    {"effect_session_commit", (DL_FUNC) &effect_session_commit, 4},
     {"effect_session_write_outcome", (DL_FUNC) &effect_session_write_outcome, 3},
     {"effect_session_state", (DL_FUNC) &effect_session_state, 1},
+    {"effect_session_testing", (DL_FUNC) &effect_session_testing, 0},
     {NULL, NULL, 0}};
 
 void R_init_runix(DllInfo *dll) {

@@ -48,6 +48,7 @@
 #define RUNIX_APT_RES_CAP 256     /* bound resource string cap               */
 #define RUNIX_SOCKPATH_CAP 108    /* AF_UNIX sun_path bound                  */
 #define RUNIX_ERRCODE_CAP 40      /* broker error-code buffer                */
+#define RUNIX_DETAIL_CAP 129      /* commit result detail (<=128) + NUL      */
 
 /* Build list(status=<chr>, detail=<chr|NA>). Cross-platform (no secret). */
 static SEXP es_status_result(const char *status, const char *detail) {
@@ -86,10 +87,23 @@ static SEXP es_open_result(SEXP handle, const char *cid, const char *status,
 
 #ifdef __linux__
 
+#include <errno.h>
+#include <fcntl.h>
 #include <jansson.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>     /* posix_spawn of the pkexec entrypoint */
 #include <stdlib.h>
 #include <sys/types.h> /* pid_t */
-#include <unistd.h>    /* getpid */
+#include <sys/wait.h>  /* waitpid */
+#include <time.h>      /* nanosleep */
+#include <unistd.h>    /* getpid, pipe, read */
+
+extern char **environ; /* passed to posix_spawn; pkexec scrubs it itself */
+
+/* pkexec is the immutable privileged launcher; the entrypoint path comes only
+ * from the runix-owned verb map, never from R. */
+#define RUNIX_PKEXEC_PATH "/usr/bin/pkexec"
 
 /* The nine contracted apt verbs, in a runix-owned closed enum. */
 typedef enum {
@@ -696,6 +710,374 @@ SEXP effect_session_state(SEXP handle_) {
     return out;
 }
 
+/* ---- commit: posix_spawn of the immutable pkexec entrypoint --------------- */
+
+/* The commit channel's 12-value closed status set (result.c). Anything else is
+ * a malformed result. */
+static int es_known_commit_status(const char *s) {
+    static const char *codes[] = {
+        "ok", "no_op", "resolve_failed", "package_not_owned", "held",
+        "protected_package", "dpkg_broken", "internal", "apt_locked",
+        "no_intent", "not_applied", "operation_failed"};
+    size_t n = sizeof codes / sizeof codes[0];
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(s, codes[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Parse the entrypoint's strict result {status, effect_issued, correlation_id,
+ * detail} (exact 4 keys, dup-rejecting). Returns 0 and fills status/issued/
+ * detail on success (correlation_id must equal the intent's); -1 on malformed
+ * or a mismatched correlation id. Never allocates R. */
+static int es_parse_commit_result(const unsigned char *b, size_t n, char *status,
+                                  size_t status_cap, int *issued, char *detail,
+                                  size_t detail_cap, const char *expect_cid) {
+    json_error_t jerr;
+    json_t *root = json_loadb((const char *) b, n, JSON_REJECT_DUPLICATES, &jerr);
+    if (root == NULL) {
+        return -1;
+    }
+    int rc = -1;
+    if (!json_is_object(root) || json_object_size(root) != 4) {
+        goto done;
+    }
+    json_t *jst = json_object_get(root, "status");
+    json_t *jei = json_object_get(root, "effect_issued");
+    json_t *jcid = json_object_get(root, "correlation_id");
+    json_t *jd = json_object_get(root, "detail");
+    if (!json_is_string(jst) || !json_is_boolean(jei) || !json_is_string(jcid) ||
+        !json_is_string(jd)) {
+        goto done;
+    }
+    if (!es_known_commit_status(json_string_value(jst))) {
+        goto done;
+    }
+    if (strcmp(json_string_value(jcid), expect_cid) != 0) {
+        goto done;
+    }
+    strncpy(status, json_string_value(jst), status_cap - 1);
+    status[status_cap - 1] = '\0';
+    *issued = json_boolean_value(jei) ? 1 : 0;
+    strncpy(detail, json_string_value(jd), detail_cap - 1);
+    detail[detail_cap - 1] = '\0';
+    rc = 0;
+done:
+    json_decref(root);
+    return rc;
+}
+
+typedef struct {
+    int spawned;   /* posix_spawn succeeded (a child existed) */
+    int exited;    /* reaped a normal exit */
+    int exit_code; /* WEXITSTATUS if exited */
+    unsigned char *body;
+    size_t body_len;
+} es_commit_io;
+
+/* Write all of `buf` to a PIPE fd under the deadline (rab_write_all uses send()
+ * and is socket-only; the child's stdin is a pipe). Returns 0 on full write,
+ * -1 otherwise. The caller has SIGPIPE ignored, so a child that closed its
+ * stdin yields EPIPE here rather than a signal. */
+static int es_pipe_write(int fd, const unsigned char *buf, size_t n,
+                         long long dl) {
+    size_t off = 0;
+    while (off < n) {
+        int w = rab_wait(fd, POLLOUT, dl);
+        if (w != 1) {
+            return -1; /* deadline or poll error */
+        }
+        ssize_t k = write(fd, buf + off, n - off);
+        if (k < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1; /* EPIPE or other I/O error */
+        }
+        off += (size_t) k;
+    }
+    return 0;
+}
+
+/* Spawn argv (absolute path, no shell), deliver `req` on the child's stdin and
+ * WIPE it immediately, read the child's stdout (its result channel) to a bounded
+ * buffer under a wall-clock deadline, and reap the child (SIGKILL on overrun).
+ * The receipt lives in `req`; it is explicit_bzero'd here the instant it is
+ * delivered (or on a spawn failure, undelivered). Fills `io`; returns 0 unless
+ * pipe setup itself failed (-1). */
+static int es_run_commit(char *const argv[], char *req, size_t reqlen,
+                         int deadline_ms, es_commit_io *io) {
+    memset(io, 0, sizeof *io);
+    int reqp[2], resp[2];
+    if (pipe(reqp) != 0) {
+        explicit_bzero(req, reqlen);
+        return -1;
+    }
+    if (pipe(resp) != 0) {
+        close(reqp[0]);
+        close(reqp[1]);
+        explicit_bzero(req, reqlen);
+        return -1;
+    }
+    /* the parent's ends must not leak into the child */
+    fcntl(reqp[1], F_SETFD, FD_CLOEXEC);
+    fcntl(resp[0], F_SETFD, FD_CLOEXEC);
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, reqp[0], STDIN_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, resp[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&fa, reqp[0]);
+    posix_spawn_file_actions_addclose(&fa, resp[1]);
+
+    pid_t pid;
+    int sp = posix_spawn(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(reqp[0]);
+    close(resp[1]);
+    if (sp != 0) {
+        close(reqp[1]);
+        close(resp[0]);
+        explicit_bzero(req, reqlen); /* never delivered */
+        return 0;                    /* io->spawned stays 0 */
+    }
+    io->spawned = 1;
+
+    /* Ignore SIGPIPE for the child interaction: a child that closed its stdin
+     * early must yield EPIPE (handled), never a signal death of the R process. */
+    struct sigaction ign, old_pipe;
+    int have_old = 0;
+    memset(&ign, 0, sizeof ign);
+    ign.sa_handler = SIG_IGN;
+    sigemptyset(&ign.sa_mask);
+    if (sigaction(SIGPIPE, &ign, &old_pipe) == 0) {
+        have_old = 1;
+    }
+
+    long long now = rab_now_ms();
+    long long dl = (now < 0) ? -1 : now + deadline_ms;
+    if (dl >= 0) {
+        (void) es_pipe_write(reqp[1], (const unsigned char *) req, reqlen, dl);
+    }
+    explicit_bzero(req, reqlen); /* delivered: wipe our copy immediately */
+    close(reqp[1]);              /* EOF for the child's stdin */
+
+    unsigned char *buf = (unsigned char *) malloc(RAB_MAX_BODY);
+    size_t got = 0;
+    if (buf != NULL && dl >= 0) {
+        for (;;) {
+            int w = rab_wait(resp[0], POLLIN, dl);
+            if (w != 1) {
+                break; /* deadline or error */
+            }
+            ssize_t k = read(resp[0], buf + got, RAB_MAX_BODY - got);
+            if (k < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (k == 0) {
+                break; /* EOF: the child closed its result channel */
+            }
+            got += (size_t) k;
+            if (got >= RAB_MAX_BODY) {
+                break;
+            }
+        }
+    }
+    close(resp[0]);
+    io->body = buf;
+    io->body_len = got;
+
+    /* reap, SIGKILL if it overruns the deadline */
+    for (;;) {
+        int status;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            io->exited = WIFEXITED(status);
+            io->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            break;
+        }
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        long long n2 = rab_now_ms();
+        if (n2 < 0 || (dl >= 0 && n2 >= dl)) {
+            kill(pid, SIGKILL);
+            (void) waitpid(pid, &status, 0);
+            break;
+        }
+        struct timespec ts = {0, 5 * 1000 * 1000L}; /* 5 ms */
+        nanosleep(&ts, NULL);
+    }
+    if (have_old) {
+        (void) sigaction(SIGPIPE, &old_pipe, NULL);
+    }
+    return 0;
+}
+
+/* Build list(session_status, status, effect_issued, correlation_id, detail).
+ * effect_issued is TRUE/FALSE/NA (helper-authoritative; NA only when the effect
+ * is genuinely unknown). No secret is present. */
+static SEXP es_commit_result(const char *session_status, const char *status,
+                             int issued_tri, const char *cid,
+                             const char *detail) {
+    SEXP out = PROTECT(allocVector(VECSXP, 5));
+    SET_VECTOR_ELT(out, 0, mkString(session_status));
+    SET_VECTOR_ELT(out, 1,
+                   status == NULL ? ScalarString(NA_STRING) : mkString(status));
+    SET_VECTOR_ELT(out, 2,
+                   ScalarLogical(issued_tri < 0 ? NA_LOGICAL : issued_tri));
+    SET_VECTOR_ELT(out, 3,
+                   cid == NULL ? ScalarString(NA_STRING) : mkString(cid));
+    SET_VECTOR_ELT(out, 4,
+                   detail == NULL ? ScalarString(NA_STRING) : mkString(detail));
+    SEXP nm = PROTECT(allocVector(STRSXP, 5));
+    SET_STRING_ELT(nm, 0, mkChar("session_status"));
+    SET_STRING_ELT(nm, 1, mkChar("status"));
+    SET_STRING_ELT(nm, 2, mkChar("effect_issued"));
+    SET_STRING_ELT(nm, 3, mkChar("correlation_id"));
+    SET_STRING_ELT(nm, 4, mkChar("detail"));
+    setAttrib(out, R_NamesSymbol, nm);
+    UNPROTECT(2);
+    return out;
+}
+
+/* ---- .Call: commit -------------------------------------------------------
+ * Delivers the receipt to the immutable pkexec entrypoint for this session's
+ * verb and reads the strict result. The receipt is wiped the instant it is
+ * delivered. effect_issued is FALSE only when the effect provably did not run
+ * (spawn failed, or pkexec denied before exec), NA when it is genuinely unknown
+ * (the child ran but produced no valid result), and otherwise the helper's own
+ * boolean. */
+SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
+                           SEXP deadline_ms_) {
+    runix_effect_session *s = es_from_handle(handle_);
+    if (s->state != ES_OPENED) {
+        error("effect session is not open for commit");
+    }
+    if (s->receipt == NULL) {
+        error("effect session has no receipt");
+    }
+    if (TYPEOF(packages_) != STRSXP) {
+        error("packages must be a character vector");
+    }
+    int lock_timeout = rab_arg_nonneg_int(lock_timeout_, "lock_timeout");
+    if (lock_timeout > 3600) {
+        error("lock_timeout must be in [0, 3600]");
+    }
+    int deadline_ms = rab_arg_nonneg_int(deadline_ms_, "deadline_ms");
+
+    /* build {effect_receipt, correlation_id, plan_schema, packages, lock_timeout}
+     * (exact member set the entrypoint accepts) in wipeable heap. */
+    json_t *root = json_object();
+    json_t *pkgs = json_array();
+    if (root == NULL || pkgs == NULL) {
+        json_decref(root);
+        json_decref(pkgs);
+        error("failed to build commit request");
+    }
+    for (R_xlen_t i = 0; i < XLENGTH(packages_); i++) {
+        SEXP e = STRING_ELT(packages_, i);
+        if (e == NA_STRING) {
+            json_decref(root);
+            json_decref(pkgs);
+            error("package names must be non-NA");
+        }
+        json_array_append_new(pkgs, json_string(CHAR(e)));
+    }
+    json_object_set_new(root, "effect_receipt",
+                        json_string((const char *) s->receipt));
+    json_object_set_new(root, "correlation_id", json_string(s->correlation_id));
+    json_object_set_new(root, "plan_schema", json_integer(s->plan_schema));
+    json_object_set_new(root, "packages", pkgs);
+    json_object_set_new(root, "lock_timeout", json_integer(lock_timeout));
+    char *req = json_dumps(root, JSON_COMPACT); /* carries the receipt */
+    json_decref(root);
+    if (req == NULL) {
+        error("failed to encode commit request");
+    }
+    size_t reqlen = strlen(req);
+
+    /* argv: the immutable pkexec + this verb's entrypoint. R never names a path.
+     * The compile-time-only testing seam substitutes a fake command; it is
+     * ABSENT from the production build, and no runtime env var can redirect the
+     * production pkexec target. */
+#ifdef RUNIX_TESTING
+    const char *fake = getenv("RUNIX_TEST_ENTRYPOINT");
+    if (fake == NULL) {
+        explicit_bzero(req, reqlen);
+        free(req);
+        error("RUNIX_TEST_ENTRYPOINT unset in a testing build");
+    }
+    char *argv[] = {(char *) fake, (char *) RUNIX_VERBS[s->verb].entrypoint,
+                    NULL};
+#else
+    char *argv[] = {(char *) RUNIX_PKEXEC_PATH,
+                    (char *) RUNIX_VERBS[s->verb].entrypoint, NULL};
+#endif
+
+    s->state = ES_RECEIPT_SENT;
+    es_commit_io io;
+    (void) es_run_commit(argv, req, reqlen, deadline_ms, &io);
+    free(req); /* already explicit_bzero'd inside es_run_commit */
+    /* the receipt is single-use and now delivered (or unrecoverably not): wipe */
+    es_wipe(&s->receipt, RUNIX_RECEIPT_HEXLEN + 1);
+
+    const char *session_status;
+    const char *rstatus = NULL;
+    const char *rdetail = NULL;
+    int issued_tri;
+    char status[24];
+    char detail[RUNIX_DETAIL_CAP];
+    if (io.body != NULL && io.body_len > 0 &&
+        es_parse_commit_result(io.body, io.body_len, status, sizeof status,
+                               &issued_tri, detail, sizeof detail,
+                               s->correlation_id) == 0) {
+        /* the helper spoke: its status and effect_issued are authoritative */
+        session_status = "ok";
+        rstatus = status;
+        rdetail = detail;
+        s->state = ES_RESULT_KNOWN;
+    } else if (!io.spawned) {
+        /* posix_spawn never produced a child: the effect definitely did not run */
+        session_status = "spawn_failed";
+        issued_tri = 0;
+        s->state = ES_RESULT_KNOWN;
+    } else if (io.exited && (io.exit_code == 126 || io.exit_code == 127)) {
+        /* pkexec's own denial/not-found: the entrypoint never committed */
+        session_status = "unauthorized";
+        issued_tri = 0;
+        s->state = ES_RESULT_KNOWN;
+    } else {
+        /* the child ran but produced no valid result: the effect is UNKNOWN */
+        session_status = "effect_unknown";
+        issued_tri = -1;
+        s->state = ES_EFFECT_UNKNOWN;
+    }
+    if (io.body != NULL) {
+        free(io.body); /* the result carries no secret */
+    }
+    return es_commit_result(session_status, rstatus, issued_tri,
+                            s->correlation_id, rdetail);
+}
+
+/* Whether this build carries the compile-time testing seam (a fake entrypoint
+ * may be substituted for the pkexec commit). FALSE in the production build. */
+SEXP effect_session_testing(void) {
+#ifdef RUNIX_TESTING
+    return ScalarLogical(TRUE);
+#else
+    return ScalarLogical(FALSE);
+#endif
+}
+
 #else /* not __linux__: the effect session is Linux-only */
 
 SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
@@ -722,6 +1104,20 @@ SEXP effect_session_state(SEXP handle_) {
     (void) handle_;
     error("effect sessions are Linux-only");
     return R_NilValue; /* unreached */
+}
+
+SEXP effect_session_commit(SEXP handle_, SEXP packages_, SEXP lock_timeout_,
+                           SEXP deadline_ms_) {
+    (void) handle_;
+    (void) packages_;
+    (void) lock_timeout_;
+    (void) deadline_ms_;
+    error("effect sessions are Linux-only");
+    return R_NilValue; /* unreached */
+}
+
+SEXP effect_session_testing(void) {
+    return ScalarLogical(FALSE);
 }
 
 #endif

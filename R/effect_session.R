@@ -38,9 +38,28 @@
           as.integer(c(connect_ms, recv_ms, send_ms)))
 }
 
+## Commit: deliver the C-held receipt to the verb's immutable pkexec entrypoint
+## and read the strict result. Returns list(session_status, status,
+## effect_issued, correlation_id, detail). session_status is "ok" when the helper
+## spoke, else spawn_failed/unauthorized/effect_unknown; effect_issued is the
+## helper's boolean, FALSE when the effect provably did not run, NA when it is
+## genuinely unknown. The receipt is wiped the instant it is delivered.
+.effect_session_commit <- function(handle, packages = character(),
+                                   lock_timeout = 0L, deadline_ms = 120000L) {
+    .Call(C_effect_session_commit, handle, as.character(packages),
+          as.integer(lock_timeout), as.integer(deadline_ms))
+}
+
 ## Inspect a handle's state. Returns list(state, owner_pid, correlation_id,
 ## has_receipt, has_binding) -- has_receipt/has_binding are booleans, never the
 ## secret values. For tests and assertions.
 .effect_session_state <- function(handle) {
     .Call(C_effect_session_state, handle)
+}
+
+## TRUE only in a build carrying the compile-time fake-entrypoint seam
+## (-DRUNIX_TESTING); FALSE in the production build. The commit-spawn tests key
+## on this and skip when the seam is absent.
+.effect_session_testing <- function() {
+    .Call(C_effect_session_testing)
 }
