@@ -16,6 +16,18 @@
   receipt-minting `open_intent` is serviceable only through the effect session,
   making "the receipt never reaches R" a property of the API rather than a
   caller convention.
+- The native effect session itself (`src/effect_session.c`): a PID-bound
+  `EXTPTRSXP` handle over an `open_intent(+effect)` -> `write_outcome` state
+  machine. The single-use effect receipt and outcome binding are extracted from
+  the broker response with linked Jansson, in C, into wipeable heap
+  (`explicit_bzero` on consumption and in the finalizer) and NEVER become R
+  objects; R sees only the handle, the correlation id, and a status. The handle
+  refuses reuse, a `fork` (owner-PID mismatch), and a restore-from-disk (a
+  serialized external pointer loses its address). The finalizer only wipes, so a
+  dropped handle leaves the intent open (fail-closed). `.Call` entry points
+  `effect_session_open`/`write_outcome`/`state`; the verb is a runix-owned
+  closed enum mapped in C to the immutable pkexec entrypoint (no path crosses
+  from R). The commit path (posix_spawn of that entrypoint) lands next.
 
 # runix 0.0.1.10
 

@@ -43,6 +43,14 @@
           as.integer(delay_ms))
 }
 
+## Serve a SEQUENCE of connections on one bound socket (bind once, serve each
+## `replies` frame in order, unlink once) -- for a client that makes two calls
+## to the same endpoint without a second server rebinding the path.
+.broker_test_serve_seq <- function(path, replies, read_first = TRUE) {
+    .Call(C_rab_test_serve_seq, path, lapply(replies, as.raw),
+          isTRUE(read_first))
+}
+
 ## Runtime, side-effect-free availability probe wrapper (see C_rab_broker_probe).
 .broker_probe <- function(path, expected_uid = 0L, connect_ms = 500L) {
     .Call(C_rab_broker_probe, path, as.integer(expected_uid),

@@ -36,31 +36,21 @@
 #include <limits.h>
 #include <string.h>
 
-/* status codes returned to R in list(status=, body=) */
-#define RAB_ST_OK 0
-#define RAB_ST_UNAVAILABLE 1  /* no socket / connection refused */
-#define RAB_ST_TIMEOUT 2      /* a deadline passed */
-#define RAB_ST_BAD_FRAME 3    /* bad version / oversize / truncated response */
-#define RAB_ST_IO 4           /* socket error, or peer closed without a reply */
-#define RAB_ST_UNSUPPORTED 5  /* the broker client is Linux-only */
-#define RAB_ST_PEER 6         /* server peer uid is not the expected uid */
-#define RAB_ST_EFFECT_REFUSED 7 /* effect-bearing request on the generic path */
-
-#define RAB_PROTO_VERSION 1
-#define RAB_MAX_BODY 65536u /* 64 KiB, matching the wire protocol */
+#include "rab_internal.h" /* RAB_ST_* / RAB_MAX_BODY + the shared-helper seam */
 
 /* ---- defensive .Call argument validation --------------------------------
  * These entry points are internal, but they must not assume only the wrapper
- * calls them: wrong types or NA would otherwise walk straight into C. */
+ * calls them: wrong types or NA would otherwise walk straight into C. Shared
+ * with effect_session.c via rab_internal.h, so not static. */
 
-static const char *rab_arg_string(SEXP x, const char *what) {
+const char *rab_arg_string(SEXP x, const char *what) {
     if (TYPEOF(x) != STRSXP || LENGTH(x) != 1 || STRING_ELT(x, 0) == NA_STRING) {
         error("%s must be a single non-NA string", what);
     }
     return CHAR(STRING_ELT(x, 0));
 }
 
-static int rab_arg_nonneg_int(SEXP x, const char *what) {
+int rab_arg_nonneg_int(SEXP x, const char *what) {
     double v;
     if (TYPEOF(x) == INTSXP && LENGTH(x) == 1) {
         if (INTEGER(x)[0] == NA_INTEGER || INTEGER(x)[0] < 0) {
@@ -106,8 +96,9 @@ static SEXP rab_result(int status, SEXP body) {
 
 #include <jansson.h> /* in-C extraction on the effect-receipt path */
 
-/* Monotonic milliseconds; -1 if the clock itself fails (treated as IO). */
-static long long rab_now_ms(void) {
+/* Monotonic milliseconds; -1 if the clock itself fails (treated as IO).
+ * Shared with effect_session.c (rab_internal.h), so not static. */
+long long rab_now_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return -1;
@@ -117,7 +108,7 @@ static long long rab_now_ms(void) {
 
 /* Wait for `events` on fd until the absolute monotonic deadline.
  * 1 = ready, 0 = deadline passed, -1 = error (including clock failure). */
-static int rab_wait(int fd, short events, long long deadline_ms) {
+int rab_wait(int fd, short events, long long deadline_ms) {
     for (;;) {
         long long now = rab_now_ms();
         if (now < 0) {
@@ -147,8 +138,7 @@ static int rab_wait(int fd, short events, long long deadline_ms) {
 
 /* 0 ok, -2 timeout, -1 io. MSG_NOSIGNAL: a peer that closed must yield EPIPE,
  * never a SIGPIPE into the R process. */
-static int rab_write_all(int fd, const unsigned char *buf, size_t n,
-                         long long dl) {
+int rab_write_all(int fd, const unsigned char *buf, size_t n, long long dl) {
     size_t off = 0;
     while (off < n) {
         int w = rab_wait(fd, POLLOUT, dl);
@@ -171,7 +161,7 @@ static int rab_write_all(int fd, const unsigned char *buf, size_t n,
 }
 
 /* 0 ok, 1 eof before n, -2 timeout, -1 io. */
-static int rab_read_all(int fd, unsigned char *buf, size_t n, long long dl) {
+int rab_read_all(int fd, unsigned char *buf, size_t n, long long dl) {
     size_t off = 0;
     while (off < n) {
         int w = rab_wait(fd, POLLIN, dl);
@@ -222,10 +212,9 @@ static int rab_peer_uid_ok(int fd, int expected_uid) {
  * zero-length body yields *out_buf == NULL. On any non-OK status *out_buf is
  * NULL and *out_len is 0. Returns a RAB_ST_* code; never allocates R, never
  * longjmps. */
-static int rab_transport(const char *path, const unsigned char *req,
-                         size_t reqlen, int connect_ms, int recv_ms,
-                         int send_ms, int expected_uid,
-                         unsigned char **out_buf, size_t *out_len) {
+int rab_transport(const char *path, const unsigned char *req, size_t reqlen,
+                  int connect_ms, int recv_ms, int send_ms, int expected_uid,
+                  unsigned char **out_buf, size_t *out_len) {
     *out_buf = NULL;
     *out_len = 0;
     if (reqlen > RAB_MAX_BODY) {
@@ -616,6 +605,118 @@ SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
     return ScalarInteger(rc);
 }
 
+/* Like C_rab_test_serve_once but serves a SEQUENCE of connections on ONE bound
+ * socket: bind + listen once, then for each reply in `replies_` (a list of raw
+ * frame vectors) accept a connection, optionally consume its request, write the
+ * reply verbatim, and close -- unlinking once at the very end. This models a
+ * real broker (one path, many requests), so a client that must make two calls
+ * to the same endpoint -- an effect session's open then write_outcome, which
+ * reconnect to the same path -- never forces a SECOND server to REBIND that
+ * path. Rebinding a just-unlinked path in a fresh forked child is what the
+ * fork-based harness does not tolerate; one long-lived server sidesteps it.
+ * Returns 0 on success or the negative code of the first failing connection. */
+SEXP C_rab_test_serve_seq(SEXP path_, SEXP replies_, SEXP read_first_) {
+    const char *path = rab_arg_string(path_, "path");
+    if (TYPEOF(replies_) != VECSXP) {
+        error("replies must be a list of raw vectors");
+    }
+    if (TYPEOF(read_first_) != LGLSXP || LENGTH(read_first_) != 1 ||
+        LOGICAL(read_first_)[0] == NA_LOGICAL) {
+        error("read_first must be a single non-NA logical");
+    }
+    int read_first = LOGICAL(read_first_)[0];
+    R_xlen_t nrep = XLENGTH(replies_);
+
+    if (getenv("RUNIX_ALLOW_TEST_SERVER") == NULL) {
+        return ScalarInteger(-98); /* refused: not enabled */
+    }
+    struct stat pst;
+    if (lstat(path, &pst) == 0) {
+        return ScalarInteger(-97); /* path exists; refuse */
+    }
+    int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (lfd < 0) {
+        return ScalarInteger(-1);
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof addr.sun_path) {
+        close(lfd);
+        return ScalarInteger(-1);
+    }
+    strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+    if (bind(lfd, (struct sockaddr *) &addr, sizeof addr) != 0) {
+        close(lfd);
+        return ScalarInteger(-1);
+    }
+    if (listen(lfd, (int) (nrep > 0 ? nrep : 1)) != 0) {
+        close(lfd);
+        unlink(path);
+        return ScalarInteger(-1);
+    }
+
+    int rc = 0;
+    for (R_xlen_t i = 0; i < nrep; i++) {
+        SEXP reply = VECTOR_ELT(replies_, i);
+        if (TYPEOF(reply) != RAWSXP) {
+            rc = -1;
+            break;
+        }
+        long long now = rab_now_ms();
+        if (now < 0) {
+            rc = -1;
+            break;
+        }
+        int cfd = -1;
+        if (rab_wait(lfd, POLLIN, now + 10000) == 1) {
+            cfd = accept(lfd, NULL, NULL);
+        }
+        if (cfd < 0) {
+            rc = -2; /* nobody connected for this reply */
+            break;
+        }
+        int cfl = fcntl(cfd, F_GETFL, 0);
+        if (cfl >= 0) {
+            fcntl(cfd, F_SETFL, cfl | O_NONBLOCK);
+        }
+        if (read_first) {
+            long long rdl0 = rab_now_ms();
+            if (rdl0 >= 0) {
+                long long rdl = rdl0 + 2000;
+                unsigned char h[5];
+                if (rab_read_all(cfd, h, 5, rdl) == 0) {
+                    unsigned int n = ((unsigned int) h[1] << 24) |
+                                     ((unsigned int) h[2] << 16) |
+                                     ((unsigned int) h[3] << 8) |
+                                     (unsigned int) h[4];
+                    if (n > 0 && n <= RAB_MAX_BODY) {
+                        unsigned char *tmp = (unsigned char *) malloc(n);
+                        if (tmp != NULL) {
+                            (void) rab_read_all(cfd, tmp, n, rdl);
+                            free(tmp);
+                        }
+                    }
+                }
+            }
+        }
+        R_xlen_t rl = XLENGTH(reply);
+        if (rl > 0) {
+            long long wdl0 = rab_now_ms();
+            if (wdl0 >= 0 &&
+                rab_write_all(cfd, RAW(reply), (size_t) rl, wdl0 + 2000) != 0) {
+                rc = -3;
+                close(cfd);
+                break;
+            }
+        }
+        close(cfd);
+    }
+    close(lfd);
+    unlink(path);
+    return ScalarInteger(rc);
+}
+
 #else /* not __linux__: the broker client is Linux-only */
 
 SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
@@ -646,6 +747,13 @@ SEXP C_rab_test_serve_once(SEXP path_, SEXP reply_, SEXP read_first_,
     return ScalarInteger(-99); /* unsupported platform */
 }
 
+SEXP C_rab_test_serve_seq(SEXP path_, SEXP replies_, SEXP read_first_) {
+    (void) path_;
+    (void) replies_;
+    (void) read_first_;
+    return ScalarInteger(-99); /* unsupported platform */
+}
+
 #endif
 
 static const R_CallMethodDef rab_call_methods[] = {
@@ -654,6 +762,11 @@ static const R_CallMethodDef rab_call_methods[] = {
     {"rab_broker_call", (DL_FUNC) &C_rab_broker_call, 6},
     {"rab_broker_probe", (DL_FUNC) &C_rab_broker_probe, 3},
     {"rab_test_serve_once", (DL_FUNC) &C_rab_test_serve_once, 4},
+    {"rab_test_serve_seq", (DL_FUNC) &C_rab_test_serve_seq, 3},
+    /* native effect session (effect_session.c) */
+    {"effect_session_open", (DL_FUNC) &effect_session_open, 7},
+    {"effect_session_write_outcome", (DL_FUNC) &effect_session_write_outcome, 3},
+    {"effect_session_state", (DL_FUNC) &effect_session_state, 1},
     {NULL, NULL, 0}};
 
 void R_init_runix(DllInfo *dll) {
