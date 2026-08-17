@@ -1,3 +1,22 @@
+# runix 0.0.1.11
+
+- Native effect-session groundwork (pkgops slice 2). The broker C client
+  (`src/unix_socket.c`) now links `libjansson` (anticonf `configure`; a new
+  `SystemRequirements`) for strict, in-C extraction on the coming
+  effect-receipt path, so the single-use receipt and outcome binding will be
+  parsed and wiped in C and never become R objects.
+- The socket exchange is refactored into a shared byte-level transport
+  (`rab_transport`) operating on plain `malloc` buffers; `C_rab_broker_call`
+  keeps its existing behavior (copying the response into a `RAWSXP` for
+  non-secret payloads) while the effect session will parse-and-wipe the same
+  buffer before any R object exists. One transport, two consumers, no
+  duplicated socket code.
+- `C_rab_broker_call` now REFUSES any request whose body carries a top-level
+  `effect` member (new transport status `runix_effect_via_generic_path`): a
+  receipt-minting `open_intent` is serviceable only through the effect session,
+  making "the receipt never reaches R" a property of the API rather than a
+  caller convention.
+
 # runix 0.0.1.10
 
 - The audit-broker client adapter now recognizes the effect-receipt

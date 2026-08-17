@@ -23,6 +23,7 @@
 .RAB_ST_IO <- 4L
 .RAB_ST_UNSUPPORTED <- 5L
 .RAB_ST_PEER <- 6L
+.RAB_ST_EFFECT_REFUSED <- 7L
 
 ## Low-level framed request/response. Returns list(status = <int>, body =
 ## <raw|NULL>); never throws for a broker-side or transport failure.
@@ -82,6 +83,10 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
            "3" = "runix_broker_bad_response",
            "4" = "runix_broker_io",
            "6" = "runix_broker_untrusted_peer",
+           ## an effect-bearing request refused on the generic C path: the
+           ## receipt-minting open_intent is serviceable only through the
+           ## effect session, never this GC-copying transport.
+           "7" = "runix_effect_via_generic_path",
            "runix_broker_error")
 }
 

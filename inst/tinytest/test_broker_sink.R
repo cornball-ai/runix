@@ -188,6 +188,43 @@ expect_error(runix:::.broker_call(NA_character_, "{}"), "non-NA string")
 expect_error(runix:::.broker_call(tempfile(), "{}", connect_ms = -1L),
              "non-negative")
 
+## ---- effect-bearing requests are refused on the generic C path ------------
+## A receipt-minting open_intent (top-level `effect`) must never travel this
+## GC-copying transport, only effect_session_open (where the receipt is
+## extracted and wiped in C). The guard is a jansson parse in C that fires
+## BEFORE any connection, so even a nonexistent socket yields the refusal, not
+## a transport status -- proving it is a property of the entry point, not a
+## caller convention. Linux-only (elsewhere the whole entry point is
+## "unsupported", so the guard never runs).
+if (identical(Sys.info()[["sysname"]], "Linux")) {
+    no_sock <- tempfile(fileext = ".sock") # never created: proves no connect
+    eff <- runix:::encode_json_line(list(
+        type = "open_intent",
+        record = list(operation = "apt.install", resource = "nginx"),
+        effect = list(required = TRUE, plan_schema = 1L,
+                      plan_hash = strrep("a", 64))))
+    expect_equal(runix:::.broker_call(no_sock, eff)$status,
+                 runix:::.RAB_ST_EFFECT_REFUSED)
+    expect_equal(runix:::.broker_status_error(runix:::.RAB_ST_EFFECT_REFUSED),
+                 "runix_effect_via_generic_path")
+    ## a normal (non-effect) request passes the guard and reaches transport,
+    ## where a nonexistent socket is the ordinary "unavailable"
+    noeff <- runix:::encode_json_line(list(
+        type = "open_intent",
+        record = list(operation = "apt.install", resource = "nginx")))
+    expect_equal(runix:::.broker_call(no_sock, noeff)$status,
+                 runix:::.RAB_ST_UNAVAILABLE)
+    ## top-level only: an `effect` key nested inside a record is domain content,
+    ## not an effect request, and passes through to transport
+    nested <- runix:::encode_json_line(list(
+        type = "emit", record = list(effect = "described in prose")))
+    expect_equal(runix:::.broker_call(no_sock, nested)$status,
+                 runix:::.RAB_ST_UNAVAILABLE)
+    ## a body that is not a JSON object is not our concern: pass through
+    expect_equal(runix:::.broker_call(no_sock, "not json at all")$status,
+                 runix:::.RAB_ST_UNAVAILABLE)
+}
+
 ## capability probe: a runtime, root-authenticated check, never a Boolean or
 ## socket-existence guess. No socket -> unavailable -> not system-durable.
 expect_equal(broker_available(tempfile(fileext = ".sock"), connect_ms = 200L),

@@ -44,6 +44,7 @@
 #define RAB_ST_IO 4           /* socket error, or peer closed without a reply */
 #define RAB_ST_UNSUPPORTED 5  /* the broker client is Linux-only */
 #define RAB_ST_PEER 6         /* server peer uid is not the expected uid */
+#define RAB_ST_EFFECT_REFUSED 7 /* effect-bearing request on the generic path */
 
 #define RAB_PROTO_VERSION 1
 #define RAB_MAX_BODY 65536u /* 64 KiB, matching the wire protocol */
@@ -102,6 +103,8 @@ static SEXP rab_result(int status, SEXP body) {
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <jansson.h> /* in-C extraction on the effect-receipt path */
 
 /* Monotonic milliseconds; -1 if the clock itself fails (treated as IO). */
 static long long rab_now_ms(void) {
@@ -204,22 +207,34 @@ static int rab_peer_uid_ok(int fd, int expected_uid) {
     return cred.uid == (uid_t) expected_uid ? 1 : 0;
 }
 
-SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
-                       SEXP send_ms_, SEXP expected_uid_) {
-    const char *path = rab_arg_string(path_, "path");
-    const char *body = rab_arg_string(body_, "body");
-    int connect_ms = rab_arg_nonneg_int(connect_ms_, "connect_ms");
-    int recv_ms = rab_arg_nonneg_int(recv_ms_, "recv_ms");
-    int send_ms = rab_arg_nonneg_int(send_ms_, "send_ms");
-    int expected_uid = rab_arg_nonneg_int(expected_uid_, "expected_uid");
-    size_t blen = strlen(body);
-    if (blen > RAB_MAX_BODY) {
-        return rab_result(RAB_ST_BAD_FRAME, R_NilValue);
+/* ---- shared byte-level transport ----------------------------------------
+ * One framed request/response exchange over the broker socket, operating on
+ * plain byte buffers and NEVER touching an R object. Two consumers share it:
+ * C_rab_broker_call, which copies the response into a GC-managed RAWSXP for
+ * non-secret payloads, and the effect session, which parses and wipes the
+ * response in C before any R object exists (the receipt/binding must never
+ * reach a RAWSXP). Connect, authenticate the SERVER peer via SO_PEERCRED
+ * BEFORE the first request byte, frame and send the request, then read one
+ * framed response into a freshly malloc'd buffer.
+ *
+ * On RAB_ST_OK, *out_buf is a malloc'd buffer of *out_len bytes the CALLER
+ * frees (and, when it may carry a secret, explicit_bzero's before free); a
+ * zero-length body yields *out_buf == NULL. On any non-OK status *out_buf is
+ * NULL and *out_len is 0. Returns a RAB_ST_* code; never allocates R, never
+ * longjmps. */
+static int rab_transport(const char *path, const unsigned char *req,
+                         size_t reqlen, int connect_ms, int recv_ms,
+                         int send_ms, int expected_uid,
+                         unsigned char **out_buf, size_t *out_len) {
+    *out_buf = NULL;
+    *out_len = 0;
+    if (reqlen > RAB_MAX_BODY) {
+        return RAB_ST_BAD_FRAME;
     }
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        return rab_result(RAB_ST_IO, R_NilValue);
+        return RAB_ST_IO;
     }
     int fl = fcntl(fd, F_GETFL, 0);
     if (fl >= 0) {
@@ -232,48 +247,48 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     addr.sun_family = AF_UNIX;
     if (strlen(path) >= sizeof addr.sun_path) {
         close(fd);
-        return rab_result(RAB_ST_IO, R_NilValue);
+        return RAB_ST_IO;
     }
     strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
 
     long long now = rab_now_ms();
     if (now < 0) {
         close(fd);
-        return rab_result(RAB_ST_IO, R_NilValue);
+        return RAB_ST_IO;
     }
     long long cdl = now + connect_ms;
     if (connect(fd, (struct sockaddr *) &addr, sizeof addr) < 0) {
         if (errno == ENOENT || errno == ECONNREFUSED) {
             close(fd);
-            return rab_result(RAB_ST_UNAVAILABLE, R_NilValue);
+            return RAB_ST_UNAVAILABLE;
         }
         if (errno == EINPROGRESS) {
             int w = rab_wait(fd, POLLOUT, cdl);
             if (w == 0) {
                 close(fd);
-                return rab_result(RAB_ST_TIMEOUT, R_NilValue);
+                return RAB_ST_TIMEOUT;
             }
             if (w < 0) {
                 close(fd);
-                return rab_result(RAB_ST_IO, R_NilValue);
+                return RAB_ST_IO;
             }
             int soerr = 0;
             socklen_t sl = sizeof soerr;
             if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) < 0) {
                 close(fd);
-                return rab_result(RAB_ST_IO, R_NilValue);
+                return RAB_ST_IO;
             }
             if (soerr == ENOENT || soerr == ECONNREFUSED) {
                 close(fd);
-                return rab_result(RAB_ST_UNAVAILABLE, R_NilValue);
+                return RAB_ST_UNAVAILABLE;
             }
             if (soerr != 0) {
                 close(fd);
-                return rab_result(RAB_ST_IO, R_NilValue);
+                return RAB_ST_IO;
             }
         } else {
             close(fd);
-            return rab_result(RAB_ST_IO, R_NilValue);
+            return RAB_ST_IO;
         }
     }
 
@@ -282,36 +297,36 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     int pk = rab_peer_uid_ok(fd, expected_uid);
     if (pk != 1) {
         close(fd);
-        return rab_result(pk == 0 ? RAB_ST_PEER : RAB_ST_IO, R_NilValue);
+        return pk == 0 ? RAB_ST_PEER : RAB_ST_IO;
     }
 
     /* frame and send: [version][uint32 be length][body] */
     now = rab_now_ms();
     if (now < 0) {
         close(fd);
-        return rab_result(RAB_ST_IO, R_NilValue);
+        return RAB_ST_IO;
     }
     long long sdl = now + send_ms;
     unsigned char hdr[5];
     hdr[0] = (unsigned char) RAB_PROTO_VERSION;
-    hdr[1] = (unsigned char) ((blen >> 24) & 0xff);
-    hdr[2] = (unsigned char) ((blen >> 16) & 0xff);
-    hdr[3] = (unsigned char) ((blen >> 8) & 0xff);
-    hdr[4] = (unsigned char) (blen & 0xff);
+    hdr[1] = (unsigned char) ((reqlen >> 24) & 0xff);
+    hdr[2] = (unsigned char) ((reqlen >> 16) & 0xff);
+    hdr[3] = (unsigned char) ((reqlen >> 8) & 0xff);
+    hdr[4] = (unsigned char) (reqlen & 0xff);
     int wr = rab_write_all(fd, hdr, 5, sdl);
-    if (wr == 0 && blen > 0) {
-        wr = rab_write_all(fd, (const unsigned char *) body, blen, sdl);
+    if (wr == 0 && reqlen > 0) {
+        wr = rab_write_all(fd, req, reqlen, sdl);
     }
     if (wr != 0) {
         close(fd);
-        return rab_result(wr == -2 ? RAB_ST_TIMEOUT : RAB_ST_IO, R_NilValue);
+        return wr == -2 ? RAB_ST_TIMEOUT : RAB_ST_IO;
     }
 
     /* read one framed response */
     now = rab_now_ms();
     if (now < 0) {
         close(fd);
-        return rab_result(RAB_ST_IO, R_NilValue);
+        return RAB_ST_IO;
     }
     long long rdl = now + recv_ms;
     unsigned char rhdr[5];
@@ -319,30 +334,89 @@ SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
     if (rr != 0) {
         close(fd);
         /* eof before a reply (peer closed) is an IO failure, not a bad frame */
-        return rab_result(rr == -2 ? RAB_ST_TIMEOUT : RAB_ST_IO, R_NilValue);
+        return rr == -2 ? RAB_ST_TIMEOUT : RAB_ST_IO;
     }
     if (rhdr[0] != RAB_PROTO_VERSION) {
         close(fd);
-        return rab_result(RAB_ST_BAD_FRAME, R_NilValue);
+        return RAB_ST_BAD_FRAME;
     }
     unsigned int rlen = ((unsigned int) rhdr[1] << 24) |
                         ((unsigned int) rhdr[2] << 16) |
                         ((unsigned int) rhdr[3] << 8) | (unsigned int) rhdr[4];
     if (rlen > RAB_MAX_BODY) {
         close(fd);
-        return rab_result(RAB_ST_BAD_FRAME, R_NilValue);
+        return RAB_ST_BAD_FRAME;
     }
-    SEXP raw = PROTECT(allocVector(RAWSXP, rlen));
+    unsigned char *buf = NULL;
     if (rlen > 0) {
-        int br = rab_read_all(fd, RAW(raw), rlen, rdl);
-        if (br != 0) {
-            UNPROTECT(1);
+        buf = (unsigned char *) malloc(rlen);
+        if (buf == NULL) {
             close(fd);
-            return rab_result(br == -2 ? RAB_ST_TIMEOUT : RAB_ST_BAD_FRAME,
-                              R_NilValue);
+            return RAB_ST_IO;
+        }
+        int br = rab_read_all(fd, buf, rlen, rdl);
+        if (br != 0) {
+            explicit_bzero(buf, rlen); /* a partial body may carry a receipt */
+            free(buf);
+            close(fd);
+            return br == -2 ? RAB_ST_TIMEOUT : RAB_ST_BAD_FRAME;
         }
     }
     close(fd);
+    *out_buf = buf;
+    *out_len = rlen;
+    return RAB_ST_OK;
+}
+
+/* 1 iff `body` parses as a JSON object carrying a top-level "effect" member.
+ * Parsing is permissive (duplicate keys kept, last wins) precisely because the
+ * job is to REFUSE: catching an effect member in even a slightly malformed body
+ * is the fail-closed direction. A body that does not parse as a JSON object is
+ * not our concern here (the broker rejects it and mints nothing), so it returns
+ * 0 and passes through. */
+static int rab_body_has_effect(const char *body, size_t blen) {
+    json_error_t err;
+    json_t *root = json_loadb(body, blen, 0, &err);
+    if (root == NULL) {
+        return 0;
+    }
+    int has = json_is_object(root) && json_object_get(root, "effect") != NULL;
+    json_decref(root);
+    return has;
+}
+
+SEXP C_rab_broker_call(SEXP path_, SEXP body_, SEXP connect_ms_, SEXP recv_ms_,
+                       SEXP send_ms_, SEXP expected_uid_) {
+    const char *path = rab_arg_string(path_, "path");
+    const char *body = rab_arg_string(body_, "body");
+    int connect_ms = rab_arg_nonneg_int(connect_ms_, "connect_ms");
+    int recv_ms = rab_arg_nonneg_int(recv_ms_, "recv_ms");
+    int send_ms = rab_arg_nonneg_int(send_ms_, "send_ms");
+    int expected_uid = rab_arg_nonneg_int(expected_uid_, "expected_uid");
+    size_t blen = strlen(body);
+    if (blen > RAB_MAX_BODY) {
+        return rab_result(RAB_ST_BAD_FRAME, R_NilValue);
+    }
+    /* Effect-bearing intents never travel this GC-copying path: refuse them so
+     * "the receipt never becomes an R object" is a property of the API, not a
+     * caller convention. Serviceable only via effect_session_open, which
+     * extracts and wipes the receipt in C. */
+    if (rab_body_has_effect(body, blen)) {
+        return rab_result(RAB_ST_EFFECT_REFUSED, R_NilValue);
+    }
+
+    unsigned char *buf = NULL;
+    size_t rlen = 0;
+    int st = rab_transport(path, (const unsigned char *) body, blen, connect_ms,
+                           recv_ms, send_ms, expected_uid, &buf, &rlen);
+    if (st != RAB_ST_OK) {
+        return rab_result(st, R_NilValue);
+    }
+    SEXP raw = PROTECT(allocVector(RAWSXP, (R_xlen_t) rlen));
+    if (rlen > 0) {
+        memcpy(RAW(raw), buf, rlen);
+        free(buf); /* non-secret payload: plain free, no wipe */
+    }
     SEXP out = rab_result(RAB_ST_OK, raw);
     UNPROTECT(1);
     return out;
