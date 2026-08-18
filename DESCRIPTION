@@ -1,8 +1,8 @@
 Package: runix
 Type: Package
 Title: Common Core for the Runix System-Administration Framework
-Version: 0.0.1.10
-Date: 2026-08-10
+Version: 0.0.1.12
+Date: 2026-08-17
 Authors@R: c(
     person("Troy", "Hernandez", role = c("aut", "cre"), email = "troy@cornball.ai",
            comment = c(ORCID = "0009-0005-4248-604X")),
@@ -30,7 +30,11 @@ SystemRequirements: coreutils 'sync' (for fsync/fdatasync of the audit sink
     and its parent directory); Linux procfs '/proc' for audit lock-owner
     liveness, boot id, and process start time (absent elsewhere, lock
     staleness degrades to an mtime timeout); the audit broker client uses
-    AF_UNIX and is Linux-only (absent elsewhere).
+    AF_UNIX and is Linux-only (absent elsewhere); libjansson (>= 2.11,
+    'libjansson-dev' on Debian/Ubuntu) linked into the C core for strict,
+    in-C parsing of broker responses on the effect-receipt path, so the
+    single-use effect receipt and outcome binding are extracted and wiped in
+    C and never become R objects.
 Suggests: tinytest
 Encoding: UTF-8
 Config/roxygen2/version: 8.0.0

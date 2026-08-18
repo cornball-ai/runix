@@ -1,0 +1,67 @@
+#!/bin/sh
+# anticonf configure for runix: find libjansson for the in-C broker/effect-session
+# extraction (src/unix_socket.c). runix already Imports janssonr, which links the
+# same system libjansson on Unix, so this adds no new system requirement here; it
+# links the library directly into runix's own object for strict, in-C parsing of
+# broker responses on the effect-receipt path (the receipt/binding are extracted
+# and wiped in C, never reaching an R object).
+#
+# The broker/effect-session client is Linux-only; on other Unix the jansson-using
+# code is #ifdef'd out, but the same system library resolves there too (janssonr
+# already required it), so a single unconditional link keeps the build uniform.
+PKG_CONFIG_NAME="jansson"
+PKG_DEB_NAME="libjansson-dev"
+PKG_RPM_NAME="jansson-devel"
+PKG_BREW_NAME="jansson"
+PKG_MIN_VERSION="2.11"
+PKG_MIN_VERSION_HEX="0x020b00"
+PKG_LIBS="-ljansson"
+PKG_CFLAGS=""
+
+# --configure-vars='INCLUDE_DIR=... LIB_DIR=...' override; each side is
+# independent so setting only one never emits an empty -I or -L
+if [ -n "$INCLUDE_DIR" ] || [ -n "$LIB_DIR" ]; then
+  [ -n "$INCLUDE_DIR" ] && PKG_CFLAGS="-I$INCLUDE_DIR"
+  [ -n "$LIB_DIR" ] && PKG_LIBS="-L$LIB_DIR -ljansson"
+elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "$PKG_CONFIG_NAME"; then
+  if ! pkg-config --atleast-version="$PKG_MIN_VERSION" "$PKG_CONFIG_NAME"; then
+    echo "jansson `pkg-config --modversion $PKG_CONFIG_NAME` found, but runix needs >= $PKG_MIN_VERSION"
+    exit 1
+  fi
+  PKG_CFLAGS=`pkg-config --cflags "$PKG_CONFIG_NAME"`
+  PKG_LIBS=`pkg-config --libs "$PKG_CONFIG_NAME"`
+fi
+# else: bare -ljansson fallback; the cpp probe below still enforces the floor
+
+: "${R_HOME=`R RHOME`}"
+CC=`"${R_HOME}/bin/R" CMD config CC`
+CPPFLAGS=`"${R_HOME}/bin/R" CMD config CPPFLAGS`
+
+# Header usable AND floor holds, even without pkg-config (pipe, no temp files)
+if ! printf '#include <jansson.h>\n#if JANSSON_VERSION_HEX < %s\n#error too old\n#endif\n' \
+     "$PKG_MIN_VERSION_HEX" | \
+     $CC $CPPFLAGS $PKG_CFLAGS -E -xc - >/dev/null 2>&1; then
+  echo "------------------------- ANTICONF ERROR ---------------------------"
+  echo "Configuration failed: libjansson >= $PKG_MIN_VERSION was not found."
+  echo "Install the development package:"
+  echo " * deb:  $PKG_DEB_NAME  (Debian, Ubuntu)"
+  echo " * rpm:  $PKG_RPM_NAME  (Fedora, RHEL, openSUSE)"
+  echo " * brew: $PKG_BREW_NAME (macOS)"
+  echo "For non-standard locations set PKG_CONFIG_PATH, or:"
+  echo "  R CMD INSTALL --configure-vars='INCLUDE_DIR=... LIB_DIR=...' runix"
+  echo "--------------------------------------------------------------------"
+  exit 1
+fi
+
+# Optional compile-time test seam: when RUNIX_TESTING is set at build time, the
+# effect-session commit substitutes a caller-named fake entrypoint (via
+# RUNIX_TEST_ENTRYPOINT) for the pkexec spawn, so the spawn/pipe/wipe/parse path
+# can be unit-tested without root. It is ABSENT from the default (production)
+# build -- no runtime env var can redirect the production pkexec target.
+if [ -n "$RUNIX_TESTING" ]; then
+  PKG_CFLAGS="$PKG_CFLAGS -DRUNIX_TESTING"
+  echo "runix: building WITH the -DRUNIX_TESTING commit seam (do not ship)"
+fi
+
+sed -e "s|@cflags@|$PKG_CFLAGS|" -e "s|@libs@|$PKG_LIBS|" src/Makevars.in > src/Makevars
+exit 0

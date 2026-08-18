@@ -1,3 +1,4 @@
 deploy/dist/
 src/*.o
 src/*.so
+src/Makevars

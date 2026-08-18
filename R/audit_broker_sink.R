@@ -23,6 +23,7 @@
 .RAB_ST_IO <- 4L
 .RAB_ST_UNSUPPORTED <- 5L
 .RAB_ST_PEER <- 6L
+.RAB_ST_EFFECT_REFUSED <- 7L
 
 ## Low-level framed request/response. Returns list(status = <int>, body =
 ## <raw|NULL>); never throws for a broker-side or transport failure.
@@ -40,6 +41,14 @@
                                     delay_ms = 0L) {
     .Call(C_rab_test_serve_once, path, as.raw(reply), isTRUE(read_first),
           as.integer(delay_ms))
+}
+
+## Serve a SEQUENCE of connections on one bound socket (bind once, serve each
+## `replies` frame in order, unlink once) -- for a client that makes two calls
+## to the same endpoint without a second server rebinding the path.
+.broker_test_serve_seq <- function(path, replies, read_first = TRUE) {
+    .Call(C_rab_test_serve_seq, path, lapply(replies, as.raw),
+          isTRUE(read_first))
 }
 
 ## Runtime, side-effect-free availability probe wrapper (see C_rab_broker_probe).
@@ -82,6 +91,10 @@ broker_available <- function(socket_path = "/run/runix-audit.sock",
            "3" = "runix_broker_bad_response",
            "4" = "runix_broker_io",
            "6" = "runix_broker_untrusted_peer",
+           ## an effect-bearing request refused on the generic C path: the
+           ## receipt-minting open_intent is serviceable only through the
+           ## effect session, never this GC-copying transport.
+           "7" = "runix_effect_via_generic_path",
            "runix_broker_error")
 }
 
