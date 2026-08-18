@@ -11,18 +11,43 @@
 ## and the effect-capability gate in a later change. Linux-only, like the broker
 ## client: elsewhere every call returns a typed "unsupported" status.
 
+## Coerce `x` to a scalar integer, ERRORING (never silently truncating) if it is
+## not a single, finite, non-NA, integer-VALUED number in optional [lo, hi].
+## `as.integer(1.5)` would quietly become 1 and negotiate/commit the wrong value;
+## every numeric argument that reaches a `.Call` is checked through here first.
+.scalar_int <- function(x, what, lo = NULL, hi = NULL) {
+    if (length(x) != 1L || !is.numeric(x) || is.na(x) || !is.finite(x) ||
+        x != floor(x) || abs(x) > .Machine$integer.max) {
+        stop(sprintf("`%s` must be a single integer value", what),
+             call. = FALSE)
+    }
+    x <- as.integer(x)
+    if (!is.null(lo) && x < lo) {
+        stop(sprintf("`%s` must be >= %d", what, lo), call. = FALSE)
+    }
+    if (!is.null(hi) && x > hi) {
+        stop(sprintf("`%s` must be <= %d", what, hi), call. = FALSE)
+    }
+    x
+}
+
 ## Open an effect-bearing intent. Returns
 ## list(handle = <externalptr|NULL>, correlation_id = <chr|NA>,
 ##      status = <chr>, detail = <chr|NA>). status is "ok" on success; otherwise
 ## one of unavailable/unsupported/timeout/io/bad_response/untrusted_peer/
 ## bad_request/broker_error (detail carries the broker error code or the
 ## offending field). The receipt and binding never appear in the result.
+## plan_schema is checked integer-valued only (0/negative are the C's
+## bad_request / non-negative error, not silently truncated here).
 .effect_session_open <- function(socket_path, operation, resource,
                                  plan_schema, plan_hash, connect_ms = 2000L,
                                  recv_ms = 5000L, send_ms = 5000L) {
-    .Call(C_effect_session_open, socket_path, operation, resource,
-          as.integer(plan_schema), plan_hash,
-          as.integer(c(connect_ms, recv_ms, send_ms)))
+    plan_schema <- .scalar_int(plan_schema, "plan_schema")
+    deadlines <- c(.scalar_int(connect_ms, "connect_ms", lo = 0L),
+                   .scalar_int(recv_ms, "recv_ms", lo = 0L),
+                   .scalar_int(send_ms, "send_ms", lo = 0L))
+    .Call(C_effect_session_open, socket_path, operation, resource, plan_schema,
+          plan_hash, deadlines)
 }
 
 ## Close the intent with the C-held outcome binding. `record` is the outcome
@@ -32,8 +57,11 @@
 ## of the result, moving the session to closed.
 .effect_session_write_outcome <- function(handle, record, connect_ms = 2000L,
     recv_ms = 5000L, send_ms = 5000L) {
+    deadlines <- c(.scalar_int(connect_ms, "connect_ms", lo = 0L),
+                   .scalar_int(recv_ms, "recv_ms", lo = 0L),
+                   .scalar_int(send_ms, "send_ms", lo = 0L))
     .Call(C_effect_session_write_outcome, handle, encode_json_line(record),
-          as.integer(c(connect_ms, recv_ms, send_ms)))
+          deadlines)
 }
 
 ## Commit: deliver the C-held receipt to the verb's immutable pkexec entrypoint
@@ -44,8 +72,10 @@
 ## genuinely unknown. The receipt is wiped the instant it is delivered.
 .effect_session_commit <- function(handle, packages = character(),
                                    lock_timeout = 0L, deadline_ms = 120000L) {
+    lock_timeout <- .scalar_int(lock_timeout, "lock_timeout", lo = 0L)
+    deadline_ms <- .scalar_int(deadline_ms, "deadline_ms", lo = 0L)
     .Call(C_effect_session_commit, handle, as.character(packages),
-          as.integer(lock_timeout), as.integer(deadline_ms))
+          lock_timeout, deadline_ms)
 }
 
 ## Inspect a handle's state. Returns list(state, owner_pid, correlation_id,

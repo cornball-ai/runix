@@ -6,11 +6,16 @@
 
 ## ---- argument validation (no server) -------------------------------------
 expect_error(runix:::.effect_capability(tempfile(), plan_schema = 0L),
-             "positive integer")
+             ">= 1")
 expect_error(runix:::.effect_capability(tempfile(), plan_schema = c(1L, 2L)),
-             "positive integer")
+             "single integer value")
 expect_error(runix:::.effect_capability(tempfile(), plan_schema = NA_integer_),
-             "positive integer")
+             "single integer value")
+## a fractional schema is rejected, never silently truncated to 1
+expect_error(runix:::.effect_capability(tempfile(), plan_schema = 1.5),
+             "single integer value")
+expect_error(runix:::.effect_capability(tempfile(), connect_ms = 200.5),
+             "single integer value")
 
 ## ---- an unreachable broker fails closed, typed --------------------------
 e <- tryCatch(effect_capability(tempfile(fileext = ".sock"), connect_ms = 200L),
@@ -61,6 +66,9 @@ if (is_linux && tinytest::at_home() &&
                            '"record_schema_version":1,',
                            '"extensions":{"effect_receipt":1},',
                            '"plan_schemas":[2]}')
+    caps_v2 <- paste0('{"ok":true,"frame_version":1,',
+                      '"record_schema_version":1,',
+                      '"extensions":{"effect_receipt":2},"plan_schemas":[1]}')
     err_unknown <- '{"ok":false,"error":"unknown_request","message":"x"}'
 
     sock <- tempfile("fake-cap-")
@@ -68,7 +76,8 @@ if (is_linux && tinytest::at_home() &&
         frame_json(caps_full),    # conn 1: full support -> capability object
         frame_json(caps_noext),   # conn 2: no effect_receipt extension
         frame_json(caps_schema2), # conn 3: plan_schema 1 not offered
-        frame_json(err_unknown)   # conn 4: broker does not know the query
+        frame_json(caps_v2),      # conn 4: extension version 2, not this client
+        frame_json(err_unknown)   # conn 5: broker does not know the query
     ), read_first = TRUE))
 
     cap_call <- function() {
@@ -112,10 +121,17 @@ if (is_linux && tinytest::at_home() &&
     expect_true(grepl("does not accept plan_schema", conditionMessage(c3)))
     expect_equal(c3$plan_schemas, 2L)
 
-    ## conn 4: broker does not know the capabilities query -> fail closed
+    ## conn 4: the advertised extension version is not the one this client
+    ## implements -> fail closed, carries the offered version (strict, not >=1)
     c4 <- cap_call()
     expect_true(inherits(c4, "runix_capability_unavailable"))
-    expect_equal(c4$broker, "unknown_request")
+    expect_true(grepl("version", conditionMessage(c4)))
+    expect_equal(c4$extension_version, 2L)
+
+    ## conn 5: broker does not know the capabilities query -> fail closed
+    c5 <- cap_call()
+    expect_true(inherits(c5, "runix_capability_unavailable"))
+    expect_equal(c5$broker, "unknown_request")
 
     parallel::mccollect(broker)
 }

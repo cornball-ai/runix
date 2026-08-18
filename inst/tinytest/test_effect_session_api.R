@@ -42,6 +42,17 @@ if (is_linux) {
         effect_session_open(tempfile(fileext = ".sock"), "apt.frobnicate",
                             "nginx", 1L, plan_hash),
         "unknown apt operation")
+
+    ## fractional numeric arguments are rejected before any coercion or call --
+    ## never silently truncated (plan_schema = 1.5 must not become 1)
+    expect_error(
+        effect_session_open(tempfile(fileext = ".sock"), "apt.install", "nginx",
+                            1.5, plan_hash),
+        "integer value")
+    expect_error(
+        effect_session_open(tempfile(fileext = ".sock"), "apt.install", "nginx",
+                            1L, plan_hash, connect_ms = 200.5),
+        "integer value")
 }
 
 ## ---- full flow through the exported API (compile-time seam only) ----------
@@ -127,6 +138,12 @@ if (is_linux && runix:::.effect_session_testing() && tinytest::at_home() &&
     out <- capture.output(print(h))
     expect_true(any(grepl("opened", out)))
     expect_true(any(grepl(cid, out, fixed = TRUE)))
+
+    ## fractional commit arguments are rejected before the receipt is spent:
+    ## the session stays open, the receipt intact
+    expect_error(effect_session_commit(h, lock_timeout = 1.5), "integer value")
+    expect_error(effect_session_commit(h, deadline_ms = 1.5), "integer value")
+    expect_equal(runix:::.effect_session_state(h$handle)$state, "opened")
 
     ## commit returns a classed raw result (runix does not map the status)
     cr <- effect_session_commit(h, packages = "nginx", lock_timeout = 5L,

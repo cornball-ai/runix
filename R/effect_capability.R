@@ -3,6 +3,11 @@
 ## answers; it does NOT establish that the broker speaks the effect-receipt
 ## extension at the plan schema the issuer needs. This is that negotiation.
 
+## The effect-receipt wire-extension version this client implements. The broker
+## must advertise exactly this in extensions.effect_receipt; a higher (or lower)
+## version is a wire the client does not implement, so negotiation fails closed.
+.RUNIX_EFFECT_RECEIPT_VERSION <- 1L
+
 #' Negotiate the broker's effect-receipt capability
 #'
 #' Sends the broker's \code{capabilities} query and confirms the reply
@@ -54,10 +59,12 @@ effect_capability <- function(socket_path = "/run/runix-audit.sock",
 .effect_capability <- function(socket_path, plan_schema = 1L,
                                connect_ms = 2000L, recv_ms = 5000L,
                                send_ms = 5000L, expected_uid = 0L) {
-    plan_schema <- suppressWarnings(as.integer(plan_schema))
-    if (length(plan_schema) != 1L || is.na(plan_schema) || plan_schema < 1L) {
-        stop("plan_schema must be a single positive integer")
-    }
+    ## integer-valued validation before coercion: `plan_schema = 1.5` must not
+    ## silently negotiate schema 1.
+    plan_schema <- .scalar_int(plan_schema, "plan_schema", lo = 1L)
+    connect_ms <- .scalar_int(connect_ms, "connect_ms", lo = 0L)
+    recv_ms <- .scalar_int(recv_ms, "recv_ms", lo = 0L)
+    send_ms <- .scalar_int(send_ms, "send_ms", lo = 0L)
     ## Every failure exits through here as a single fail-closed condition; the
     ## structured `data` lets a caller branch without parsing the message.
     fail <- function(reason, data = list()) {
@@ -89,6 +96,16 @@ effect_capability <- function(socket_path = "/run/runix-audit.sock",
     ext <- v$fields$extensions[["effect_receipt"]]
     if (!.broker_is_count(ext)) {
         fail("broker does not advertise the effect-receipt extension")
+    }
+    ## The wire-extension version is a single integer, not a range. This client
+    ## implements exactly .RUNIX_EFFECT_RECEIPT_VERSION; a broker advertising a
+    ## different version speaks a wire we cannot assume we understand, so we fail
+    ## closed rather than negotiate blindly (a v1 client must not accept v2).
+    if (!identical(as.integer(ext), .RUNIX_EFFECT_RECEIPT_VERSION)) {
+        fail(sprintf(paste0("broker advertises effect-receipt extension ",
+                            "version %d; this client implements version %d"),
+                     as.integer(ext), .RUNIX_EFFECT_RECEIPT_VERSION),
+             data = list(extension_version = as.integer(ext)))
     }
     schemas <- vapply(v$fields$plan_schemas, as.integer, integer(1))
     if (!(plan_schema %in% schemas)) {
