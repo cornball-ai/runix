@@ -21,11 +21,11 @@ integer; the arc uses schema 1). Must appear in the broker's advertised
 \item{connect_ms,recv_ms,send_ms}{Millisecond deadlines for the exchange.}
 }
 \value{
-Invisibly, a \code{runix_effect_capability} object listing the
-  negotiated \code{effect_receipt} extension version, the accepted
-  \code{plan_schema}, the full \code{plan_schemas} vector, and the broker's
-  \code{frame_version} / \code{record_schema_version}. Raises
-  \code{runix_capability_unavailable} on any failure.
+A \code{runix_effect_capability} object listing the negotiated
+  \code{effect_receipt} extension version, the accepted \code{plan_schema},
+  the full \code{plan_schemas} vector, and the broker's \code{frame_version}
+  / \code{record_schema_version}. Raises \code{runix_capability_unavailable}
+  on any failure.
 }
 \description{
 Sends the broker's \code{capabilities} query and confirms the reply
