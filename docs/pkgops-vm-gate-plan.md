@@ -96,8 +96,11 @@ hermetic tests and fails only against the real broker.
 (the exact target of the `.outcome_record()` reference "durable-audit-contract.md:112"):
 append-only JSONL, deterministic key order, one object per line. `observed` =
 the post-state actually read (may be `NA` under the `observed_failed` rule,
-`:135-136`); `changed` = the verb-specific functional effect; `state_changed` =
-the raw observed-field transition. Preview/no-op records carry
+`:135-136`); `changed` = the verb-specific functional effect **as verified against
+the read-back state**; `state_changed` = the raw observed-field transition. When a
+verb reads no post-state -- an index refresh (`apt.update`) exposes no per-package
+or index state pkgops reads -- `observed`, `changed`, and `state_changed` are all
+**omitted**, never inferred from `effect_issued`. Preview/no-op records carry
 `effect_issued=false`.
 
 ---
@@ -174,6 +177,14 @@ column and is `null` whenever the pre- **or** post-snapshot is unavailable.
 | `FALSE` — **read failure** (post read errored) | `null` | `null` | `null` (post unavailable) | `true` | `verify_detail` |
 | `NA` — no post-state (update) | `null` | `null` | `null` (nothing observable) | `false` | absent |
 
+**Wire realization:** pkgops writes every optional `null` in this table by
+**omitting the key** (`.outcome_record`'s NA/NULL-omit rule); the broker reads an
+absent optional field as null (§2.1), so `null` and an omitted key are the same wire
+outcome for an optional. `operation`/`resource`/`effect_issued`/`scope`/`preview` are
+always present. So an `apt.update` record carries exactly those five plus
+`authorized_via` and `observed_failed=false`; `observed`, `changed`, and
+`state_changed` are absent (never a fabricated `state_changed=true`).
+
 This needs the verification layer to distinguish **mismatch** from **read failure**
 — which 5a/5b collapse into a single `verified=FALSE`. Part A enriches `.verify()`
 to return the per-record observed post-state plus a read-vs-mismatch flag, behind
@@ -184,11 +195,19 @@ the existing reader seam (still hermetic). `changed` is the whole-record verdict
 ### 2.4 The exact `observed` object shapes (per verb family) — PINNED
 
 `observed` is the only object-typed field, so it carries all per-package detail. It
-is a JSON **object keyed by the resolved record's qualified identity**
-(`package:arch`, or bare `package` when the record is unqualified), one entry **per
-resolved record — including dependency records**, not only the requested targets.
-`null` when there is no post-state. Nothing today pins the apt `observed` internal
-shape (the `rab-exercise` `{status,detail}` is a placeholder), so pkgops defines it:
+is a JSON **object keyed by `package:arch`** -- the qualified identity verification
+matches on -- one entry **per resolved record — including dependency records**, not
+only the requested targets. Transaction and configure records always carry an
+architecture, so each is exactly one `package:arch` entry. **Hold/unhold records
+carry no architecture**, so an unqualified hold target records **one `package:arch`
+entry per matched selection row**, ordered deterministically (radix on
+architecture): a change confined to a single architecture is then visible in the
+pre/post diff, where a single collapsed entry would hide it (while `.verify_hold`,
+which checks every row, still fails). A target that matches no selection row is
+documented under its identity (bare `package`, or `package:arch` if it named one)
+with a `null` selection. `observed` is `null` when there is no post-state. Nothing
+today pins the apt `observed` internal shape (the `rab-exercise` `{status,detail}`
+is a placeholder), so pkgops defines it:
 
 **Transaction** (install / remove / purge / upgrade / dist_upgrade) — value =
 `{status, version}` (the dpkg state word + installed version read back):
@@ -201,9 +220,10 @@ shape (the `rab-exercise` `{status,detail}` is a placeholder), so pkgops defines
 }
 ```
 
-**Hold / unhold** — value = `{selection}` (the dpkg want word read back):
+**Hold / unhold** — value = `{selection}` (the dpkg want word read back), one entry
+per matched architecture (an unqualified target can be held on several arches):
 ```json
-"observed": {"nginx:amd64": {"selection": "hold"}}
+"observed": {"nginx:amd64": {"selection": "hold"}, "nginx:i386": {"selection": "hold"}}
 ```
 
 **Configure** — value = `{status}` (must be `installed` post-configure):
@@ -211,9 +231,13 @@ shape (the `rab-exercise` `{status,detail}` is a placeholder), so pkgops defines
 "observed": {"nginx:amd64": {"status": "installed"}}
 ```
 
-**Update** — no observable post-state:
+**Update** — no observable post-state, and pkgops reads no apt **index** state, so
+`observed`, `changed`, and `state_changed` are all **omitted** (`observed: null` in
+the outcome; the three keys never written). A successful refresh is not proof that
+any tracked state moved, and pkgops never fabricates the transition from
+`effect_issued`:
 ```json
-"observed": null
+"observed": null   // `changed` and `state_changed` omitted as well
 ```
 
 **Failure** (`operation_failed` / `dpkg_broken`) — same per-package `{status,
