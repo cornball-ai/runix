@@ -296,10 +296,18 @@ Priority: **[U]** urgent, **[N]** next, **[L]** later.
    (pkgexec #3, runix #67, with the VM-only lifecycle driver in runix-audit-broker
    #4). The verification ladder (contract → helper/API → fixture tests → the
    disposable-VM gate: dpkg locking, maintainer scripts, interrupted transactions,
-   package ownership) passed. **Remaining: `pkgops`**, the unprivileged R-facing
-   layer that previews, obtains the receipt, invokes pkgexec, verifies native state,
-   and closes the audit outcome. **← current arc.**
-8. apt mutation implementation; then gaps 4–6 incrementally.
+   package ownership) passed. **`pkgops` (the unprivileged R issuer) — done
+   (2026-08-18):** nine `apt_<verb>_preview()` + nine `apt_<verb>()` that preview,
+   obtain the receipt, invoke pkgexec, verify native state, and close the audit
+   outcome; the disposable-VM Part B proof passed (polkit 23/23, §7 gates 68/68).
+   **`rctl apt.*` (slice 4) — done (2026-08-20, rctl #12, 0.0.1.8):** the arc is
+   exposed on the CLI (`rctl apt install nginx --json`, always machine mode),
+   completing the boundary end to end. **← arc functionally complete.**
+8. **A0 release of the apt arc.** The read-only stack's A0-dev packaging
+   (`a0-packaging-plan.md`) does not yet cover `pkgexec` (the privileged `.deb`,
+   still untagged/unpublished) or `pkgops`; scope their packaging and distribution
+   — CRAN vs a proper signed apt repo is an **open decision**, and a lot more local
+   testing is wanted first. Then gaps 4–6 incrementally.
 
 ## Validation: the workflow that must be materially better
 
