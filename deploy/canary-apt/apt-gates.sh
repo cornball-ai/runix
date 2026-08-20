@@ -1,12 +1,22 @@
 #!/bin/bash
 # §7 apt-mutation acceptance gates (libapt-pkg-helper-plan.md §7) inside the guest.
-# Run as `ubuntu`. Drives the NATIVE helper boundary via:
-#   runix-apt-preview (aptbot): the PRODUCTION planner — the unprivileged, read-only
-#                     issue-time digest source (resource + plan_hash), exactly the
-#                     binary pkgops will call. NOT the root pkgexec-plan diagnostic.
-#   rab-exercise      (aptbot): the one-process open->helper->outcome lifecycle
-# Native observations only (dpkg-query, the audit sink); no R stack, so this proves
-# the native helper boundary with the production planner's hash driving redemption.
+# Run as `ubuntu`. Drives the REAL pkgops issuer path (VM-gate plan Part B), plus two
+# native-boundary oracles for the cases the issuer structurally cannot reach:
+#   apt-issue      (aptbot): the pkgops PUBLIC path -- apt_<verb>_preview() recomputes
+#                  the plan, then apt_<verb>() commits it (capability -> polkit -> the
+#                  effect-session -> the real pkexec entrypoint -> pkgstate verify ->
+#                  the durable outcome). EVERY functional gate runs through THIS
+#                  (i.e. every gate except G11a/G11b, G12, G13, G14, G15 below).
+#   rab-exercise   (aptbot): the broker/receipt oracle, retained ONLY for the gates
+#                  that deliberately inject a bad/replayed/stale receipt (G12-G14) or
+#                  a forbidden entrypoint argument (G15) -- inputs the pkgops API, which
+#                  mints its own receipt and has no package arg for a nullary verb,
+#                  cannot express. These prove the native boundary BELOW the issuer.
+#   direct pkexec  (aptbot): the receipt-schema gates G11a/G11b call an entrypoint
+#                  directly (no receipt lifecycle) to prove its own schema defense.
+# The issue-time resource + plan_hash still come from runix-apt-preview (aptbot); the
+# gates pass them to apt-issue as EXPECTED values, which it recomputes and compares
+# byte-for-byte before committing -- it never trusts a caller-supplied hash.
 #
 # Autonomous verbs (update/hold) run as aptbot directly. Every OTHER verb — unhold
 # included — is gated, so it follows codex's rule: the default-denial matrix is
@@ -197,6 +207,20 @@ do_ex() { # [--replay] <verb> <resource> <hash> [pkgs...] -> EXRC,EXSTATUS,EXDET
     EXDETAIL=$(field detail "$line"); EXEFFECT=$(field effect_issued "$line")
     EXOUTCOME=$(field outcome "$line"); EXREPLAY=$(field replay "$line")
 }
+do_issue() { # <verb> <resource> <hash> [pkgs...] -> EX* via the REAL pkgops path
+    # apt-issue (aptbot) recomputes the preview through apt_<verb>_preview(), compares
+    # the passed resource/hash byte-for-byte, then commits through apt_<verb>(). It
+    # prints ONE RESULT line in the same grammar rab-exercise uses and mirrors its exit
+    # codes (0 persisted, 1 pre-intent, 3 left-open), so every gate assertion below is
+    # unchanged. No socket arg: pkgops uses its default /run/runix-audit.sock.
+    local out line
+    out=$(sudo -u aptbot apt-issue "$@" 2>/dev/null)
+    EXRC=$?
+    line=$(grep '^RESULT ' <<<"$out" | head -1)
+    EXCID=$(field cid "$line"); EXSTATUS=$(field status "$line")
+    EXDETAIL=$(field detail "$line"); EXEFFECT=$(field effect_issued "$line")
+    EXOUTCOME=$(field outcome "$line"); EXREPLAY=$(field replay "$line")
+}
 dpkg_state() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null; }
 dpkg_ver() { dpkg-query -W -f='${Version}' "$1" 2>/dev/null; }
 # Pin every CURRENTLY-upgradable package EXCEPT canary-benign to its installed
@@ -274,27 +298,27 @@ audit_intent_outcome() { # cid label
         || no "$2 audit" "intent=$ni outcome=$no actor=$act"
 }
 
-echo "########## G-NEG: a malformed preview hard-stops before rab-exercise (issuer-side) ##########"
+echo "########## G-NEG: a malformed preview hard-stops before the issuer (issuer-side) ##########"
 # Prove the strict validator is a REAL gate, not advisory: an invalid planner response
-# must hard-stop do_plan so rab-exercise is NEVER invoked. Each case injects a crafted
+# must hard-stop do_plan so the issuer is NEVER invoked. Each case injects a crafted
 # response and runs the SAME plan_guard the real gates use, in a subshell with a
-# tripwire do_ex; an invalid case must exit nonzero with the tripwire untouched, and a
-# valid control must proceed and fire it.
+# tripwire do_issue; an invalid case must exit nonzero with the tripwire untouched, and
+# a valid control must proceed and fire it.
 neg_hardstop() { # name PPREV PH PRC expect(stop=1|proceed=0)
     local name=$1 pv=$2 ph=$3 rc=$4 expect=$5 TRIP; TRIP=$(mktemp -u)
-    ( do_ex() { : >"$TRIP"; }                    # tripwire: fires iff rab-exercise runs
+    ( do_issue() { : >"$TRIP"; }                 # tripwire: fires iff the issuer runs
       PPREV=$pv; PST=$(jq -r '.status // ""' <<<"$pv" 2>/dev/null); PH=$ph; PRC=$rc
       REQ_VERB=apt.install; REQ_PKGS_STR=x; REQ_PKGS_JSON='["x"]'; rec_schema apt.install
       plan_guard                                 # exits 1 iff invalid
-      do_ex apt.install x "$ph" x ) >/dev/null 2>&1
+      do_issue apt.install x "$ph" x ) >/dev/null 2>&1
     local rc2=$?
     if [ "$expect" = 1 ]; then
         { [ "$rc2" -ne 0 ] && [ ! -e "$TRIP" ]; } \
-            && ok "G-NEG $name hard-stopped, rab-exercise not invoked" \
+            && ok "G-NEG $name hard-stopped, issuer not invoked" \
             || no "G-NEG $name" "rc=$rc2 trip=$([ -e "$TRIP" ] && echo FIRED || echo clean)"
     else
         { [ "$rc2" -eq 0 ] && [ -e "$TRIP" ]; } \
-            && ok "G-NEG $name valid -> proceeds to rab-exercise" \
+            && ok "G-NEG $name valid -> proceeds to the issuer" \
             || no "G-NEG $name" "rc=$rc2 trip=$([ -e "$TRIP" ] && echo fired || echo MISSING)"
     fi
     rm -f "$TRIP"
@@ -312,7 +336,7 @@ neg_hardstop "valid-control"    "{\"schema_version\":1,\"status\":\"ok\",\"verb\
 echo "########## G1: update good-source -> applied, durable audit ##########"
 do_plan apt.update
 if [ "$PRC" = 0 ] && [ -n "$PH" ]; then
-    do_ex apt.update "" "$PH"
+    do_issue apt.update "" "$PH"
     { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ] && [ "$EXOUTCOME" = persisted ]; } \
         && ok "G1 update applied" || no "G1 update" "status=$EXSTATUS eff=$EXEFFECT out=$EXOUTCOME"
     audit_intent_outcome "$EXCID" "G1"
@@ -329,7 +353,7 @@ Trusted: yes
 Enabled: yes
 EOF
 do_plan apt.update
-do_ex apt.update "" "$PH"
+do_issue apt.update "" "$PH"
 { [ "$EXSTATUS" = operation_failed ] && [ "$EXEFFECT" = true ]; } \
     && ok "G2 bad-source -> operation_failed" || no "G2" "status=$EXSTATUS eff=$EXEFFECT"
 sudo rm -f "$BROKENSRC"
@@ -338,7 +362,7 @@ echo "########## G3: benign install (temp-grant) -> applied ##########"
 grant install
 sudo apt-get remove -y canary-benign >/dev/null 2>&1 || true
 do_plan apt.install canary-benign
-do_ex apt.install "$PR" "$PH" canary-benign
+do_issue apt.install "$PR" "$PH" canary-benign
 { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
     && ok "G3 install status ok" || no "G3 install" "status=$EXSTATUS eff=$EXEFFECT"
 dpkg_state canary-benign | grep -q "install ok installed" \
@@ -349,7 +373,7 @@ ungrant
 echo "########## G4: benign remove (temp-grant) -> applied ##########"
 grant remove
 do_plan apt.remove canary-benign
-do_ex apt.remove "$PR" "$PH" canary-benign
+do_issue apt.remove "$PR" "$PH" canary-benign
 { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
     && ok "G4 remove status ok" || no "G4 remove" "status=$EXSTATUS eff=$EXEFFECT"
 dpkg_state canary-benign | grep -q "install ok installed" \
@@ -381,7 +405,7 @@ SIM_OK=0; { [ -n "$CBLINE" ] && [ -z "$OTHER" ]; } && SIM_OK=1
 if [ "$SETUP_OK" -eq 1 ] && [ "$SIM_OK" -eq 1 ]; then
     do_plan apt.upgrade
     if [ "${PRC:-1}" -eq 0 ] && [ -n "${PH:-}" ]; then
-        do_ex apt.upgrade "$PR" "$PH"
+        do_issue apt.upgrade "$PR" "$PH"
         { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
             && ok "G5 upgrade status ok" || no "G5 upgrade" "status=$EXSTATUS eff=$EXEFFECT"
         [ "$(dpkg_ver canary-benign)" = 1.1 ] \
@@ -399,21 +423,23 @@ ungrant
 echo "########## G8: hold (autonomous) then unhold (temp-grant), selection read-back ##########"
 sudo apt-get install -y canary-benign >/dev/null 2>&1
 do_plan apt.hold canary-benign
-do_ex apt.hold "$PR" "$PH" canary-benign
+do_issue apt.hold "$PR" "$PH" canary-benign
 sel=$(dpkg_state canary-benign | awk '{print $1}')
 { [ "$EXSTATUS" = ok ] && [ "$sel" = hold ]; } \
     && ok "G8 hold applied, selection=$sel" || no "G8 hold" "status=$EXSTATUS sel=$sel"
 grant unhold  # unhold is NOT autonomous
 do_plan apt.unhold canary-benign
-do_ex apt.unhold "$PR" "$PH" canary-benign
+do_issue apt.unhold "$PR" "$PH" canary-benign
 sel=$(dpkg_state canary-benign | awk '{print $1}')
 { [ "$EXSTATUS" = ok ] && [ "$sel" = install ]; } \
     && ok "G8 unhold applied, selection=$sel" || no "G8 unhold" "status=$EXSTATUS sel=$sel"
 ungrant
 
-echo "########## G9: protected removal refused before the receipt is spent ##########"
+echo "########## G9: protected removal refused (preview-side, no intent) ##########"
+# Through pkgops the protected refusal is PREVIEW-side: apt_remove_preview() raises
+# protected_package, so no intent opens and no receipt is spent (effect_issued=false).
 grant remove
-do_ex apt.remove canary-protected "$ZERO" canary-protected
+do_issue apt.remove canary-protected "$ZERO" canary-protected
 { [ "$EXSTATUS" = protected_package ] && [ "$EXEFFECT" = false ]; } \
     && ok "G9 protected removal refused" || no "G9" "status=$EXSTATUS eff=$EXEFFECT"
 dpkg_state canary-protected | grep -q "install ok installed" \
@@ -421,10 +447,11 @@ dpkg_state canary-protected | grep -q "install ok installed" \
 ungrant
 
 echo "########## G-OWN: rapt-owned package refused (ownership, autonomous hold) ##########"
-# r-cornball-canary matches ^r-[a-z]+-[a-z0-9.]+$ -> package_not_owned before redeem.
-# hold is autonomous, so no grant is needed; a placeholder hash is never checked (the
-# ownership refusal precedes redemption).
-do_ex apt.hold r-cornball-canary "$ZERO" r-cornball-canary
+# r-cornball-canary matches ^r-[a-z]+-[a-z0-9.]+$ -> package_not_owned. Through pkgops
+# this is a PREVIEW-side refusal: apt_hold_preview() itself raises, so NO intent is
+# opened (effect_issued=false) and the placeholder hash is never reached. hold is
+# autonomous, so no grant is needed.
+do_issue apt.hold r-cornball-canary "$ZERO" r-cornball-canary
 { [ "$EXSTATUS" = package_not_owned ] && [ "$EXEFFECT" = false ]; } \
     && ok "G-OWN rapt-owned hold refused" || no "G-OWN" "status=$EXSTATUS eff=$EXEFFECT"
 
@@ -436,7 +463,7 @@ LOCKPID=$!
 for _ in $(seq 1 20); do grep -q '^locked' "$LOCKOUT" 2>/dev/null && break; sleep 0.5; done
 grep -q '^locked' "$LOCKOUT" && ok "G10 fcntl lock held (excludes GetLock)" \
     || no "G10 lock-holder" "did not acquire the lock"
-do_ex apt.update "" "$PH"
+do_issue apt.update "" "$PH"
 { [ "$EXSTATUS" = apt_locked ] && [ "$EXEFFECT" = false ]; } \
     && ok "G10 lock contention -> apt_locked" || no "G10" "status=$EXSTATUS eff=$EXEFFECT"
 kill "$LOCKPID" 2>/dev/null; wait "$LOCKPID" 2>/dev/null || true; LOCKPID=""; rm -f "$LOCKOUT"
@@ -454,6 +481,11 @@ direct_pkexec "$LIBX/runix-apt-update" \
 { [ "$DST" = no_intent ] && [ "$DEF" = false ] && [ "$DDT" = receipt_invalid ]; } \
     && ok "G11b invalid receipt -> no_intent (detail=receipt_invalid)" || no "G11b" "status=$DST eff=$DEF detail=$DDT"
 
+# G12-G14 stay on rab-exercise (the broker/receipt oracle), NOT the pkgops issuer:
+# each deliberately presents a bad/replayed/stale RECEIPT at the redeem boundary, which
+# the pkgops path structurally cannot do -- apt-issue recomputes and commits only the
+# preview it derived itself, minting its own receipt, so it can never hand the broker a
+# wrong/replayed/drifted hash. These prove the broker's receipt defense BELOW the issuer.
 echo "########## G12: mismatched receipt (wrong bound hash) -> no_intent/receipt_mismatch ##########"
 do_ex apt.update "" "1111111111111111111111111111111111111111111111111111111111111111"
 { [ "$EXSTATUS" = no_intent ] && [ "$EXDETAIL" = receipt_mismatch ] && [ "$EXEFFECT" = false ]; } \
@@ -482,6 +514,10 @@ do_ex apt.update "" "$PH"
 sudo rm -f "$DRIFTSRC"
 
 echo "########## G15: entrypoint isolation (a package arg is REJECTED by update) ##########"
+# Stays on rab-exercise (the native oracle): this injects a package into a NULLARY
+# entrypoint to prove its arity defense (update's arity is 0 -> internal). The pkgops
+# API cannot express it -- apt_update() has no package parameter -- so the injection
+# only reaches the entrypoint through the oracle, not the issuer.
 sudo apt-get remove -y canary-benign >/dev/null 2>&1 || true
 do_plan apt.update
 do_ex apt.update "" "$PH" canary-benign  # update's arity is 0; a package is a schema refusal
@@ -496,7 +532,12 @@ grant install
 sudo rm -f /run/canary-slow.marker
 do_plan apt.install canary-slow
 INTOUT=$(mktemp)
-sudo -u aptbot rab-exercise "$SOCK" apt.install "$PR" "$PH" canary-slow >"$INTOUT" 2>&1 &
+# The pkgops launcher (an Rscript, the aptbot ANCESTOR of the pkexec-spawned root
+# committer) is deliberately NOT in the kill set: only the root helper subtree is
+# killed, so apt-issue survives to catch the commit's failure and record the intent
+# LEFT OPEN. pkgops now attaches the session cid to that left-open condition, so the
+# RESULT line still carries the cid the receipt-state assertion needs.
+sudo -u aptbot apt-issue apt.install "$PR" "$PH" canary-slow >"$INTOUT" 2>&1 &
 BGPID=$!
 # Synchronize on the postinst marker: it appears only AFTER redeem + unpack, while
 # the configure (postinst) is mid-run — the real post-redeem interruption window.
@@ -559,7 +600,7 @@ sudo rm -f /run/canary-slow.marker
 echo "########## G6/G7: failed-postinst -> dpkg_broken, then configure (broken) ##########"
 grant install
 do_plan apt.install canary-badpost
-do_ex apt.install "$PR" "$PH" canary-badpost
+do_issue apt.install "$PR" "$PH" canary-badpost
 { [ "$EXSTATUS" = dpkg_broken ] && [ "$EXEFFECT" = true ]; } \
     && ok "G6 failed-postinst -> dpkg_broken (effect issued)" || no "G6" "status=$EXSTATUS eff=$EXEFFECT"
 dpkg_state canary-badpost | grep -q "half-configured" \
@@ -567,7 +608,7 @@ dpkg_state canary-badpost | grep -q "half-configured" \
 ungrant
 grant configure
 do_plan apt.configure
-do_ex apt.configure "$PR" "$PH"
+do_issue apt.configure "$PR" "$PH"
 { [ "$EXSTATUS" = dpkg_broken ] && [ "$EXEFFECT" = true ]; } \
     && ok "G7 configure of a still-failing package -> dpkg_broken" || no "G7" "status=$EXSTATUS eff=$EXEFFECT"
 ungrant
@@ -591,7 +632,7 @@ grep -q "BEGIN PGP" <<<"$PPREV" \
     && no "G-INLINE armor leak" "armored key material in preview stdout" \
     || ok "G-INLINE no armored key material in preview output"
 if [ "$PVALID" = 1 ] && [ "$PRC" = 0 ] && [ -n "$PH" ]; then
-    do_ex apt.update "" "$PH"
+    do_issue apt.update "" "$PH"
     { [ "$EXSTATUS" = ok ] && [ "$EXEFFECT" = true ]; } \
         && ok "G-INLINE preview hash redeems through the locked update effector" \
         || no "G-INLINE redeem" "status=$EXSTATUS eff=$EXEFFECT"

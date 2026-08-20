@@ -10,10 +10,11 @@
 #     group created EMPTY by the maintainer script;
 #   - the VM-only rab-exercise lifecycle oracle, built from the same source. The
 #     issue-time hash now comes from the PACKAGED runix-apt-preview (the production
-#     planner installed from the .deb), not the root pkgexec-plan diagnostic.
-#
-# No R stack: rab-exercise stands in for pkgops, so this proves the NATIVE helper
-# boundary, not the future pkgops integration (recorded honestly in the runbook).
+#     planner installed from the .deb), not the root pkgexec-plan diagnostic;
+#   - the R stack (Part B): R 4.6 + janssonr + pkgstate + runix + pkgops (from the
+#     staged sources), plus the apt-issue launcher, so the §7 gates drive the REAL
+#     pkgops public path. rab-exercise is RETAINED as the broker/receipt oracle for
+#     the gates the issuer cannot express (G11-G15).
 #
 #   install-apt-stack.sh [src-dir]        # default /tmp/canary-apt
 set -euo pipefail
@@ -45,6 +46,44 @@ make -C "$SRC/runix-audit-broker" exercise
 cc -O2 -Wall -o "$SRC/fcntl-lock.bin" "$SRC/fcntl-lock.c"
 sudo install -m 0755 "$SRC/runix-audit-broker/rab-exercise" /usr/local/bin/rab-exercise
 sudo install -m 0755 "$SRC/fcntl-lock.bin" /usr/local/bin/fcntl-lock
+
+# --- the R stack (Part B): drive the gates through the real pkgops public path ---
+# Mirrors deploy/canary/install-stack.sh: R 4.6 from CRAN (Noble ships 4.3, which the
+# janssonr .deb outruns), janssonr from the cornball apt repo, then R CMD INSTALL the
+# staged sources in dependency order (pkgops Imports runix + pkgstate + janssonr).
+log "R 4.6 from the CRAN Ubuntu repo (Noble ships 4.3; the janssonr .deb needs >= 4.6)"
+curl -fsSL https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
+    | sudo tee /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc >/dev/null
+echo "deb https://cloud.r-project.org/bin/linux/ubuntu noble-cran40/" \
+    | sudo tee /etc/apt/sources.list.d/cran.list >/dev/null
+sudo apt-get purge -y littler r-cran-littler >/dev/null 2>&1 || true   # ABI-pinned to R 4.3
+sudo apt-get update -qq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    r-base-core r-base-dev
+echo "  $(R --version | head -1)"
+
+log "janssonr from the cornball apt repository (runix's one Import)"
+sudo tee /etc/apt/sources.list.d/janssonr.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://cornball-ai.github.io/janssonr
+Suites: noble
+Components: main
+Trusted: yes
+Enabled: yes
+EOF
+sudo apt-get update -qq
+sudo apt-get install -y r-cornball-janssonr
+
+log "install the R packages from the staged sources (runix + pkgstate, then pkgops)"
+cd "$SRC"
+for p in runix pkgstate pkgops; do
+    rm -rf "$p" && tar xzf "$p.tar.gz"
+    sudo R CMD INSTALL "$p"
+done
+
+log "install the apt-issue launcher (the pkgops issuer path; VM-only, never packaged)"
+sudo install -m 0644 "$SRC/apt-issue.R" /usr/local/bin/apt-issue.R
+sudo install -m 0755 "$SRC/apt-issue.sh" /usr/local/bin/apt-issue
 
 log "verify install surface"
 fail=0
@@ -93,4 +132,11 @@ else
 fi
 echo "  broker: $(dpkg-query -W -f='${Version}' runix-audit-broker 2>/dev/null)"
 echo "  pkgexec: $(dpkg-query -W -f='${Version}' pkgexec 2>/dev/null)"
+# the R stack + apt-issue launcher (Part B). pkgops must load with its Imports.
+for p in janssonr runix pkgstate pkgops; do
+    v=$(Rscript -e "cat(as.character(packageVersion('$p')))" 2>/dev/null) \
+        && echo "  R $p $v" || { echo "  MISSING R package $p"; fail=1; }
+done
+{ command -v apt-issue >/dev/null && [ -f /usr/local/bin/apt-issue.R ]; } \
+    && echo "  apt-issue launcher on PATH" || { echo "  MISSING apt-issue launcher"; fail=1; }
 [ "$fail" -eq 0 ] && echo "install-apt-stack: OK" || { echo "install-apt-stack: FAILED"; exit 1; }

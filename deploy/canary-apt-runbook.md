@@ -1,20 +1,31 @@
 # Canary apt — pkgexec mutation boundary on a real systemd/polkit host
 
-Status: runbook (executable). This is the **destructive VM gate** for the pkgexec
-activation slice (`libapt-pkg-helper-plan.md` §7, contract conformance 14–21) — the
-first time the apt-mutation effector (nine root entrypoints + polkit + broker
-effect-receipts) runs on a real host. It extends the A1 canary harness
-(`deploy/canary/`, same disposable KVM guest, same ownership-marked teardown); the
-KVM host's NVIDIA/kernel/boot/networking/SSH/container-runtime are never touched.
+Status: runbook (executable). This is the **destructive VM gate** for two slices:
+the pkgexec activation slice (`libapt-pkg-helper-plan.md` §7, contract conformance
+14–21) — the apt-mutation effector (nine root entrypoints + polkit + broker
+effect-receipts) on a real host — and the **pkgops VM-gate increment** Part B
+(`docs/pkgops-vm-gate-plan.md`), which drives the functional §7 gates through the
+REAL pkgops issuer and asserts the Part A durable-record round-trip. It extends the
+A1 canary harness (`deploy/canary/`, same disposable KVM guest, same
+ownership-marked teardown); the KVM host's
+NVIDIA/kernel/boot/networking/SSH/container-runtime are never touched.
 
 ## Scope, stated honestly
 
-No R stack is installed. The unprivileged issuer role that `pkgops` will one day
-play is stood in for by **`rab-exercise`**, a VM-only, uninstalled driver. So this
-proves the **native helper boundary** (parse → policy → digest → redeem gate →
-commit → outcome, plus polkit authorization), **not** the future `pkgops`
-integration. That is the point of the slice: freeze and prove the boundary before
-`pkgops` is built on top of it.
+The R stack **is** installed in the guest (R 4.6 + `janssonr` + `pkgstate` + `runix`
++ `pkgops`, from pinned staged sources), and the **functional** §7 gates run through
+the real pkgops public path via the VM-only launcher `apt-issue` (`apt-issue.sh` →
+`apt-issue.R`, calling `pkgops::apt_<verb>(apt_<verb>_preview(...))`). So this proves
+the full public path end to end: preview → capability query → polkit → native
+effect-session → real `pkexec` entrypoint → `pkgstate` verification → durable outcome
+at the real broker.
+
+`rab-exercise` is **retained** as the VM-only lower-level oracle for the gates the
+pkgops issuer cannot express, because they deliberately feed the boundary inputs a
+correct issuer would never construct: **G12/G13/G14** (a mismatched / replayed /
+drifted receipt) and **G15** (a package argument to the nullary `apt.update`
+entrypoint). **G11a/G11b** call `pkexec` directly (entrypoint-isolation, below both
+pkgops and rab-exercise). Everything else is pkgops.
 
 ## The issue-time planner and the VM-only lifecycle oracle
 
@@ -35,7 +46,18 @@ integration. That is the point of the slice: freeze and prove the boundary befor
   advisory preview matched the effector's atomic locked re-resolution. Installed from
   the pkgexec `.deb` (on PATH at `/usr/bin`); the root `pkgexec-plan` diagnostic is no
   longer used by the gates.
+- **`apt-issue`** (`apt-issue.sh` → `apt-issue.R`, VM-only, run unprivileged as the
+  principal): the pkgops issuer launcher for the **functional** gates. It RECOMPUTES
+  the preview itself via `pkgops::apt_<verb>_preview()`, treats the caller-supplied
+  `resource`/`plan_hash` as EXPECTED values compared byte-for-byte before any commit
+  (never trusting caller hash data), then calls `pkgops::apt_<verb>(preview)` and
+  prints ONE `RESULT` line in the rab-exercise grammar with matching exit codes
+  (0 persisted / 1 pre-intent / 3 left-open). No receipt or binding ever enters
+  argv/env/disk/output — pkgops keeps those in the runix C heap and wipes them.
+  Preview-side refusals (`package_not_owned`/`protected_package`, ...) are emitted
+  with `effect_issued=false` / `outcome=preview_refused`, exit 0 (no intent opened).
 - **`rab-exercise`** (broker `tools/rab-exercise.c`, run as the principal): the
+  lower-level lifecycle oracle, now used only by the injection gates (G12-G15) — the
   whole lifecycle in ONE process (the outcome binding is pinned to the opener's
   full process identity). Verifies the broker peer is uid 0; `open_intent(+effect)`;
   hands the receipt to the exact pkexec'd entrypoint over a private stdin pipe;
@@ -90,8 +112,8 @@ runtime is VM-only.
 | G6 failed-postinst | `dpkg_broken`, `effect_issued:true`; native half-configured |
 | G7 configure (still failing) | `dpkg_broken`, `effect_issued:true` |
 | G8 hold (autonomous) / unhold (temp-grant) | `ok`; dpkg selection reads back `hold` then `install` |
-| G9 protected removal | `protected_package`, `effect_issued:false`, still installed |
-| G-OWN rapt-owned refusal | `package_not_owned`, `effect_issued:false` (ownership before redeem) |
+| G9 protected removal | `protected_package`, `effect_issued:false`, still installed (pkgops **preview-side** refusal: `outcome=preview_refused`, no intent opened) |
+| G-OWN rapt-owned refusal | `package_not_owned`, `effect_issued:false` (pkgops **preview-side** refusal, before any redeem) |
 | G10 lock contention | `apt_locked` (fcntl F_SETLK holder excludes `GetLock`) |
 | G11a missing receipt | schema refusal (`internal`), `effect_issued:false` |
 | G11b invalid receipt | `no_intent`, `detail=receipt_invalid` |
@@ -122,10 +144,11 @@ of a stale grant.
 
 ## Reproduce
 
-`build-and-stage.sh` refuses to run unless all three trees are clean, `git
-archive`s from exact commits (so what is staged is exactly what is committed and
-reviewed), and ships SHA-256 sums the guest verifies before building. The host is a
-required argument (no hardcoded default).
+`build-and-stage.sh` refuses to run unless all **five** trees are clean (broker,
+pkgexec, runix, pkgstate, pkgops), `git archive`s from exact commits (so what is
+staged is exactly what is committed and reviewed — including the three R sources
+installed in the guest), and ships SHA-256 sums the guest verifies before building.
+The host is a required argument (no hardcoded default).
 
 ```
 # on the workstation (repos committed + clean):
@@ -143,6 +166,9 @@ deploy/canary/provision.sh destroy                 # owned guest + storage only
 The guest is disposable (cattle). Evidence goes to a fresh per-run
 `~/canary-apt/evidence-<ts>-<pid>/`: the matrix/gate logs, dpkg state, and a
 **redacted** audit projection (cid, actor, phase, operation, outcome,
-`effect_issued`, and receipt *state* only — never the verifier or any token; the raw
-sink never leaves the guest). Then `provision.sh destroy` removes only the owned domain
-and its storage; nothing remains on the host but `~/canary{,-apt}`.
+`effect_issued`, the Part A durable post-state fields — `observed`, `changed`,
+`state_changed`, `observed_failed`, `authorized_via` — so the durable-record
+round-trip is visible, and receipt *state* only — never the verifier, any token, or
+any bound field; the raw sink never leaves the guest). Then `provision.sh destroy`
+removes only the owned domain and its storage; nothing remains on the host but
+`~/canary{,-apt}`.
