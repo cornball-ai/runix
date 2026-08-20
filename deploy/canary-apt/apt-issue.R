@@ -44,13 +44,21 @@ if (is.null(PREVIEW[[verb]])) {
     quit(status = 2L, save = "no")
 }
 
-## the CLOSED refusal statuses: a raised condition carrying one of these is a
-## durably-persisted refusal (rab EX_OK / outcome=persisted). ok / no_op arrive on
-## the RETURN path, never as a condition.
+## the CLOSED refusal statuses: at COMMIT time, a raised condition carrying one of
+## these is a durably-persisted refusal (rab EX_OK / outcome=persisted). ok / no_op
+## arrive on the RETURN path, never as a condition.
 CLOSED <- c("held", "operation_failed", "apt_locked", "no_intent",
             "package_not_owned", "protected_package", "resolve_failed",
             "not_applied", "dpkg_broken", "internal",
             "unauthorized", "approval_required", "spawn_failed")
+
+## the PREVIEW-side refusals: the ONLY statuses the read-only planner
+## (apt_<verb>_preview()) legitimately raises as a policy refusal with no intent
+## opened -- exactly the three the contract pins a plan digest to (besides `ok`).
+## Any OTHER condition at preview time (resolve_failed, internal, a commit-only
+## status leaking in, ...) has no committable intent and is a PRE-INTENT failure
+## (exit 1), NOT a persisted refusal. This is deliberately NARROWER than CLOSED.
+PREVIEW_REFUSED <- c("package_not_owned", "held", "protected_package")
 
 ## sanitize any value to a single RESULT token: the grammar is space-separated and
 ## unquoted, so a value with whitespace would corrupt the line. NULL/NA -> "".
@@ -89,12 +97,14 @@ prev <- tryCatch(if (verb %in% NULLARY) {
         PREVIEW[[verb]](pkgs)
     }, condition = function(c) c)
 if (inherits(prev, "condition")) {
-    ## a preview-side refusal or failure: NO intent is opened. A known refusal
-    ## status (package_not_owned / held / protected_package, ...) is meaningful ->
-    ## emit it with effect_issued=false and a preview_refused outcome, exit 0. A
-    ## malformed / resolve failure has no committable intent -> exit 1.
+    ## a preview-side refusal or failure: NO intent is opened. ONLY the three genuine
+    ## planner policy refusals (package_not_owned / held / protected_package) are
+    ## meaningful, closed refusals -> emit with effect_issued=false and a
+    ## preview_refused outcome, exit 0. EVERYTHING else at preview time
+    ## (resolve_failed, internal, a commit-only status, a malformed reply) has no
+    ## committable intent -> a PRE-INTENT failure, exit 1.
     st <- prev$status
-    if (is.character(st) && length(st) == 1L && st %in% CLOSED) {
+    if (is.character(st) && length(st) == 1L && st %in% PREVIEW_REFUSED) {
         emit(prev$correlation_id, prev$plan_hash, st, prev$detail, "false",
              "preview_refused")
         quit(status = 0L, save = "no")
