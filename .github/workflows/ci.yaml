@@ -222,20 +222,24 @@ jobs:
           Rscript .github/integration/inspect.R
 
   # Lightweight validation of the VM-only apt-mutation canary payload
-  # (deploy/canary-apt): shell syntax, the C lock-holder, and the jq redactor. The
-  # payload itself runs only on a disposable guest; this just keeps it well-formed.
+  # (deploy/canary-apt): shell syntax, the C lock-holder, the jq redactor, and the R
+  # launcher. The payload itself runs only on a disposable guest; this just keeps it
+  # well-formed (deploy/ is .Rbuildignore'd, so R CMD check never sees apt-issue.R).
   canary-apt-payload:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq shellcheck
-      - name: Syntax gates (bash -n, cc -fsyntax-only, jq filter)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq shellcheck r-base-core
+      - name: Syntax gates (bash -n, cc -fsyntax-only, jq filter, R parse)
         run: |
           set -e
           for f in deploy/canary-apt/*.sh; do bash -n "$f"; done
           cc -fsyntax-only deploy/canary-apt/fcntl-lock.c
           echo '{}' | jq -f deploy/canary-apt/redact.jq >/dev/null
+          for f in deploy/canary-apt/*.R; do
+            Rscript -e 'invisible(parse(commandArgs(TRUE)[[1]]))' "$f"
+          done
       - name: shellcheck (advisory)
         continue-on-error: true
         run: shellcheck -S warning deploy/canary-apt/*.sh

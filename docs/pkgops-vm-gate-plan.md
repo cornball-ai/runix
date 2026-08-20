@@ -355,7 +355,8 @@ existing §7 gates run against it end to end."
 - Suites (in guest): `deploy/canary-apt/polkit-matrix.sh` (the **23** polkit-boundary
   assertions) and `deploy/canary-apt/apt-gates.sh` (the **37** §7 acceptance
   assertions).
-- Support: `install-apt-stack.sh`, `apt-fixtures.sh`, `fcntl-lock.c`, `redact.jq`.
+- Support: `install-apt-stack.sh`, `apt-fixtures.sh`, `fcntl-lock.c`, `redact.jq`,
+  and the VM-only pkgops launcher `apt-issue.sh` / `apt-issue.R` (never packaged).
 - Staging (workstation): `deploy/canary-apt/build-and-stage.sh <kvm-host>`.
 - Provision/teardown (shared): `deploy/canary/provision.sh` (+ `provision.sh destroy`).
 
@@ -379,9 +380,29 @@ Two harness edits (their own commit in `runix/deploy/canary-apt/`, reviewed):
 1. `install-apt-stack.sh` also installs the R stack in the guest (r2u/rapt: R +
    `janssonr`, `pkgstate` 0.0.1.9, `runix` 0.0.1.12, `pkgops` #9+PartA), matching
    the A1 slice's R-stack install pattern.
-2. `apt-gates.sh` drives each gate through `pkgops::apt_<verb>(apt_<verb>_preview(...))`
-   in place of the `rab-exercise` redeem call, keeping every gate's assertions
-   (status, `effect_issued`, dpkg post-state, temp-grant setup/teardown) identical.
+2. `apt-gates.sh` drives the **functional** gates through the real pkgops path via a
+   thin VM-only launcher `apt-issue` (`apt-issue.sh` → `apt-issue.R`), which calls
+   `pkgops::apt_<verb>(apt_<verb>_preview(...))` and prints one `RESULT` line in the
+   `rab-exercise` grammar (same tokens, same exit codes: 0 persisted / 1 pre-intent /
+   3 left-open), so each gate's assertions (status, `effect_issued`, dpkg post-state,
+   temp-grant setup/teardown) stay identical. The split is deliberate:
+
+   - **The functional gates** run through real pkgops (`apt-issue`). This includes G9
+     (protected) and G-OWN (not-owned): these surface as **preview-side refusals**
+     inside pkgops (`apt_<verb>_preview()` raises the refusal status before any intent
+     is opened), so `apt-issue` emits them with `effect_issued=false` /
+     `outcome=preview_refused` and exit 0. They are **not** broker-redemption refusals.
+   - **G12/G13/G14** (bad / replayed / stale receipt injection) and **G15** (a
+     forbidden package argument to the nullary `apt.update` entrypoint) keep calling
+     `rab-exercise` directly: they deliberately inject invalid, replayed, or stale
+     receipts / arguments that the pkgops issuer would never construct, so only the
+     lower-level oracle can express them.
+   - **G11a/G11b** invoke `pkexec` directly (the entrypoint-isolation checks), below
+     both pkgops and rab-exercise.
+
+   `apt-issue` **recomputes** the preview itself and compares the caller-supplied
+   resource / plan_hash byte-for-byte before committing — it never trusts caller hash
+   data, and no receipt or binding ever enters argv/env/disk/output.
    `polkit-matrix.sh` is **unchanged** — pkgops does not move the polkit boundary.
 
 ### 4.3 The public path proven
@@ -402,11 +423,17 @@ committed; the per-run dir is disposable). Pass = **all** of:
 1. **`polkit-matrix.sh`: 23/23** — unchanged from the pkgexec proof (pkgops does
    not touch the polkit boundary). A regression here means the harness/stack is
    mis-built, not a pkgops finding.
-2. **`apt-gates.sh`: 37/37**, now driven through `pkgops`. Every existing gate's
-   status / `effect_issued` / dpkg post-state assertion holds with pkgops as the
-   issuer (G1 update, G3/G4/G5 install/remove/upgrade, G6/G7 dpkg_broken, G8
-   hold/unhold, G9 protected, G-OWN not-owned, G10 apt_locked, G11-G14 receipt
-   failures, G15 entrypoint isolation, G-INT interrupted, G-INLINE, G-PREV-*).
+2. **`apt-gates.sh`: 37/37.** The **functional gates** run through the real pkgops
+   issuer (`apt-issue`); each gate's status / `effect_issued` / dpkg post-state
+   assertion holds with pkgops as the issuer (G1 update, G3/G4/G5
+   install/remove/upgrade, G6/G7 dpkg_broken, G8 hold/unhold, G9 protected, G-OWN
+   not-owned, G10 apt_locked, G-INT interrupted, G-INLINE, G-PREV-*). G9/G-OWN are
+   pkgops **preview-side** refusals (no intent opened), not broker-redemption
+   refusals. The remaining gates stay on the lower-level oracles by design: **G12-G14**
+   (bad / replayed / stale receipt injection) and **G15** (forbidden package arg to
+   the nullary `apt.update` entrypoint) call `rab-exercise` directly, and **G11a/G11b**
+   (entrypoint isolation) call `pkexec` directly — pkgops would never construct the
+   invalid receipts / arguments those gates inject.
 3. **NEW — durable-record round-trip.** For the success gates, the outcome line in
    `audit.jsonl` (via `redact.jq`) must:
    - be **accepted by the real broker** — every field on the allow-list with the
