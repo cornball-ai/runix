@@ -1,11 +1,26 @@
 # runix 0.0.1.13
 
+Two native effect-session conformance fixes the disposable-VM (Part B) run caught
+against a real broker -- both invisible to the schemaless fake responder the
+hermetic suite uses.
+
 - `effect_session_open()` now accepts an empty `resource` for the whole-system
   verbs (`apt.update`/`upgrade`/`dist_upgrade`/`configure`), which bind no package
   and carry `resource = ""` by contract. An empty resource is still a
   `bad_request` for the targeted verbs (`apt.install`/`remove`/`purge`/`hold`/
   `unhold`). Previously every whole-system commit failed at the session-open step;
   the native wrapper had been stricter than the broker it fronts.
+- `effect_session_open()`'s `open_intent` frame now carries the broker-required
+  `outcome = "intent"` and `effect_issued = false`, as
+  `durable-audit-contract.md` (two-phase write) has always specified for an intent
+  record. `RECORD_SCHEMA` marks `outcome` required, so the native frame was
+  `schema_invalid` at the broker; the fake responder validated nothing and passed
+  it. A new at-home regression drives the native open + `write_outcome` against the
+  real broker daemon (and asserts the daemon rejects a record missing `outcome`),
+  and a dedicated CI job (`effect-session-native`) builds runix with the testing
+  seam and a post-v0.0.1 broker so this path is exercised for real; the `linux`
+  job now runs its suite `at_home = TRUE` (it was silently skipping the pinning and
+  live-broker blocks).
 
 # runix 0.0.1.12
 
