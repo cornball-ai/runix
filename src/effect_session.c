@@ -532,7 +532,13 @@ SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
         return es_open_result(NULL, NULL, "bad_request", "plan_schema");
     }
     size_t rlen = strlen(resource);
-    if (rlen == 0 || rlen >= RUNIX_APT_RES_CAP) {
+    /* Whole-system verbs (update/upgrade/dist_upgrade/configure) carry an EMPTY
+     * resource by contract -- the broker accepts it and the durable record stores
+     * "". Only targeted verbs (install/remove/purge/hold/unhold) must name a
+     * package, so an empty resource is a bad_request for those alone. An
+     * over-length resource is always rejected. */
+    if (rlen >= RUNIX_APT_RES_CAP ||
+        (rlen == 0 && runix_verb_takes_packages(verb))) {
         return es_open_result(NULL, NULL, "bad_request", "resource");
     }
     if (strlen(socket_path) >= RUNIX_SOCKPATH_CAP) {
