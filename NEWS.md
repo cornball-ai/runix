@@ -1,3 +1,12 @@
+# runix 0.0.1.13
+
+- `effect_session_open()` now accepts an empty `resource` for the whole-system
+  verbs (`apt.update`/`upgrade`/`dist_upgrade`/`configure`), which bind no package
+  and carry `resource = ""` by contract. An empty resource is still a
+  `bad_request` for the targeted verbs (`apt.install`/`remove`/`purge`/`hold`/
+  `unhold`). Previously every whole-system commit failed at the session-open step;
+  the native wrapper had been stricter than the broker it fronts.
+
 # runix 0.0.1.12
 
 - The exported slice-2 effect-session surface (pkgops slice 2 complete), over
