@@ -69,12 +69,86 @@ jobs:
       - name: Install runix (compiles the AF_UNIX client)
         run: R CMD INSTALL .
 
+      # at_home = TRUE is REQUIRED: tinytest::test_package() defaults it to FALSE,
+      # which silently skips every at_home()-gated block -- the uid-0 pinning
+      # regression and the R-level live-broker round-trips among them. Without it
+      # this step is green while proving neither (an instrument that cannot fail).
       - name: Tests (fake-responder battery + live broker when armed)
         run: |
-          Rscript -e 'r <- tinytest::test_package("runix"); n <- sum(!vapply(r, isTRUE, logical(1))); cat(length(r), "checks,", n, "failures\n"); quit(status = as.integer(n > 0))'
+          Rscript -e 'r <- tinytest::test_package("runix", at_home = TRUE); n <- sum(!vapply(r, isTRUE, logical(1))); cat(length(r), "checks,", n, "failures\n"); quit(status = as.integer(n > 0))'
 
       - name: R CMD check (CRAN cleanliness)
         run: ./run.sh run_tests
+
+  # The NATIVE effect-session path against a REAL broker. The production `linux`
+  # job builds runix normally, so its testing-only seam (.effect_session_testing())
+  # is off and the native open/commit/write_outcome frames are never exercised
+  # end to end -- exactly the blind spot the disposable-VM (Part B) run caught (a
+  # native open_intent missing the broker-required `outcome` field passed every
+  # hermetic test because the fake responder validates no schema). This job builds
+  # runix WITH the seam (RUNIX_TESTING=1) and drives the real broker daemon so the
+  # C-built frames are validated for real. The broker is pinned to the SHA that
+  # first carries the effect-session protocol (open_intent effect.required + the
+  # receipt/binding); the v0.0.1 tag predates it and cannot serve these frames.
+  effect-session-native:
+    runs-on: ubuntu-24.04
+    env:
+      # 5752166 (on origin/master): effect-receipt capability (#3) + rab-exercise
+      # (#4). The immutable v0.0.1 tag has NO effect-session support.
+      RAB_SHA: 57521661ef55be65499348bc92ff81489939550f
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup r-ci
+        uses: eddelbuettel/github-actions/r-ci@master
+        with:
+          backend: RAPT
+
+      - name: System build deps (for the broker daemon)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjansson-dev pkg-config build-essential
+
+      - name: Install janssonr from the cornball apt repository
+        run: |
+          sudo tee /etc/apt/sources.list.d/janssonr.sources > /dev/null <<'EOF'
+          Types: deb
+          URIs: https://cornball-ai.github.io/janssonr
+          Suites: noble
+          Components: main
+          Trusted: yes
+          Enabled: yes
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y r-cornball-janssonr
+
+      - name: R dependencies
+        run: ./run.sh install_deps
+
+      # Pinned to a SHA (not the v0.0.1 tag), so a full clone + checkout rather
+      # than --branch. The repo is small; a shallow clone is not worth the fetch
+      # dance for an arbitrary object.
+      - name: Build the broker daemon at the effect-session SHA
+        run: |
+          git clone https://github.com/cornball-ai/runix-audit-broker.git "${RUNNER_TEMP}/rab"
+          git -C "${RUNNER_TEMP}/rab" checkout "${RAB_SHA}"
+          make -C "${RUNNER_TEMP}/rab"
+          echo "RUNIX_TEST_BROKER_BIN=${RUNNER_TEMP}/rab/audit-broker" >> "$GITHUB_ENV"
+
+      # RUNIX_TESTING=1 compiles the commit seam and makes .effect_session_testing()
+      # TRUE, and lets the transport accept a non-root broker via RUNIX_TEST_PEER_UID
+      # (the test sets it). A clean object tree first: a stale src/*.o from a prior
+      # non-testing build would silently defeat the -DRUNIX_TESTING flag.
+      - name: Install runix with the testing seam
+        run: |
+          rm -f src/*.o src/*.so
+          RUNIX_TESTING=1 R CMD INSTALL .
+
+      # at_home = TRUE (test_package defaults it FALSE) so the seam block AND the
+      # real-broker block run; the native frames are validated by the daemon, not a
+      # schemaless fake. A negative case asserts the daemon REJECTS a record missing
+      # `outcome` (broker_error/schema_invalid), so the guard cannot pass vacuously.
+      - name: Native effect-session round-trips against the real broker
+        run: |
+          Rscript -e 'r <- tinytest::test_package("runix", at_home = TRUE); n <- sum(!vapply(r, isTRUE, logical(1))); cat(length(r), "checks,", n, "failures\n"); quit(status = as.integer(n > 0))'
 
   # Non-Linux Unix (macOS): runix is a Unix package, but the broker is
   # Linux-only. On other Unix the package must still install, load, and keep its

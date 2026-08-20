@@ -518,5 +518,75 @@ if (is_linux && tinytest::at_home() &&
                  "takes no packages")
 
     parallel::mccollect(cbroker)
+
+    ## ---- REAL broker: the native open_intent + write_outcome FRAMES ----------
+    ## The fake broker above validates NO schema, so a malformed native frame (a
+    ## missing broker-required field, a rejected empty resource) slips through --
+    ## exactly what the Part B VM gate caught. Drive the native C open +
+    ## write_outcome against the ACTUAL broker daemon (the binary CI builds at
+    ## RUNIX_TEST_BROKER_BIN) so those frames are validated for real. The peer uid
+    ## is already unpinned to myuid above; skip when the binary is absent.
+    rbin <- Sys.getenv("RUNIX_TEST_BROKER_BIN")
+    if (nzchar(rbin) && file.exists(rbin)) {
+        rdir <- tempfile("es-realbroker-")
+        dir.create(rdir)
+        rsock <- file.path(rdir, "sock")
+        rsink <- file.path(rdir, "audit.jsonl")
+        rpid <- suppressWarnings(system(sprintf(
+            "%s --listen %s --sink %s >/dev/null 2>&1 & echo $!",
+            shQuote(rbin), shQuote(rsock), shQuote(rsink)), intern = TRUE))
+        rpid <- rpid[grepl("^[0-9]+$", rpid)][1]
+        for (i in 1:200) {
+            if (file.exists(rsock)) break
+            Sys.sleep(0.02)
+        }
+        on.exit({
+            if (length(rpid) == 1L && !is.na(rpid)) {
+                system(paste("kill", rpid, "2>/dev/null"))
+            }
+            unlink(rdir, recursive = TRUE, force = TRUE)
+        }, add = TRUE)
+        expect_true(file.exists(rsock))
+        rph <- strrep("e", 64)
+
+        ## a WHOLE-SYSTEM verb carries an EMPTY resource -> ACCEPTED. Regresses both
+        ## Part B open findings: the empty-resource rejection AND the missing
+        ## broker-required `outcome` field in open_intent. A malformed frame comes
+        ## back broker_error / bad_response, never status "ok" with a handle.
+        ru <- runix:::.effect_session_open(rsock, "apt.update", "", 1L, rph)
+        expect_equal(ru$status, "ok")
+        expect_equal(typeof(ru$handle), "externalptr")
+        expect_true(grepl("^[0-9]{20}-[0-9a-f]{16}$", ru$correlation_id))
+
+        ## native write_outcome FRAME accepted end to end: a well-formed record
+        ## (operation + the REQUIRED outcome) closes the intent. effect_issued=FALSE
+        ## so the broker's effect-receipt gate needs no redemption.
+        wu <- runix:::.effect_session_write_outcome(ru$handle,
+            list(operation = "apt.update", outcome = "ok", effect_issued = FALSE))
+        expect_equal(wu$status, "ok")
+
+        ## a targeted verb still round-trips with a non-empty resource
+        ri <- runix:::.effect_session_open(rsock, "apt.install", "nginx", 1L, rph)
+        expect_equal(ri$status, "ok")
+
+        ## NEGATIVE: a record OMITTING the broker-required `outcome` is REJECTED by
+        ## the real broker -- proving the enforcement is real and this test actually
+        ## guards the frame, not merely that the client did not error. A must-MATCH
+        ## (the exact broker_error/schema_invalid pair) rather than a must-differ, so
+        ## a transport slip cannot read as a false proof. The fake broker would have
+        ## accepted it.
+        rbad <- runix:::.effect_session_open(rsock, "apt.update", "", 1L, rph)
+        expect_equal(rbad$status, "ok")
+        wbad <- runix:::.effect_session_write_outcome(rbad$handle,
+            list(operation = "apt.update", effect_issued = FALSE))
+        expect_equal(wbad$status, "broker_error")
+        expect_equal(wbad$detail, "schema_invalid")
+
+        ## both phases of the good update landed durably in the real sink
+        Sys.sleep(0.1)
+        raud <- readLines(rsink, warn = FALSE)
+        expect_true(any(grepl("\"phase\":\"intent\"", raud, fixed = TRUE)))
+        expect_true(any(grepl("\"phase\":\"outcome\"", raud, fixed = TRUE)))
+    }
     }
 }
