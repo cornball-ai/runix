@@ -532,7 +532,13 @@ SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
         return es_open_result(NULL, NULL, "bad_request", "plan_schema");
     }
     size_t rlen = strlen(resource);
-    if (rlen == 0 || rlen >= RUNIX_APT_RES_CAP) {
+    /* Whole-system verbs (update/upgrade/dist_upgrade/configure) carry an EMPTY
+     * resource by contract -- the broker accepts it and the durable record stores
+     * "". Only targeted verbs (install/remove/purge/hold/unhold) must name a
+     * package, so an empty resource is a bad_request for those alone. An
+     * over-length resource is always rejected. */
+    if (rlen >= RUNIX_APT_RES_CAP ||
+        (rlen == 0 && runix_verb_takes_packages(verb))) {
         return es_open_result(NULL, NULL, "bad_request", "resource");
     }
     if (strlen(socket_path) >= RUNIX_SOCKPATH_CAP) {
@@ -548,8 +554,12 @@ SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
         }
     }
 
-    /* build {type, record:{operation,resource}, effect:{required,plan_schema,
-     * plan_hash}} with jansson so `resource` is properly escaped. */
+    /* build {type, record:{operation,resource,outcome,effect_issued},
+     * effect:{required,plan_schema,plan_hash}} with jansson so `resource` is
+     * properly escaped. The broker's RECORD_SCHEMA requires BOTH `operation` and
+     * `outcome`; an open_intent is the intent checkpoint, so `outcome` is the fixed
+     * "intent" and `effect_issued` is false (nothing is issued yet). This matches
+     * the reference boundary (runix-audit-broker tools/rab-exercise.c). */
     json_t *root = json_object();
     json_t *record = json_object();
     json_t *effect = json_object();
@@ -562,6 +572,8 @@ SEXP effect_session_open(SEXP socket_path_, SEXP operation_, SEXP resource_,
     json_object_set_new(record, "operation",
                         json_string(RUNIX_VERBS[verb].operation));
     json_object_set_new(record, "resource", json_string(resource));
+    json_object_set_new(record, "outcome", json_string("intent"));
+    json_object_set_new(record, "effect_issued", json_false());
     json_object_set_new(effect, "required", json_true());
     json_object_set_new(effect, "plan_schema", json_integer(plan_schema));
     json_object_set_new(effect, "plan_hash", json_string(plan_hash));

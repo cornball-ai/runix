@@ -21,7 +21,11 @@ effect_session_open(
 runix-owned closed set; the C side maps it to the immutable entrypoint, so
 no path ever crosses from R).}
 
-\item{resource}{The intent's bound resource string (non-empty).}
+\item{resource}{The intent's bound resource string. Non-empty for a targeted
+verb (\code{apt.install}/\code{remove}/\code{purge}/\code{hold}/\code{unhold});
+the empty string \code{""} for a whole-system verb
+(\code{apt.update}/\code{upgrade}/\code{dist_upgrade}/\code{configure}), which
+binds no package.}
 
 \item{plan_schema}{The plan-digest schema (a positive integer; matches the
 value negotiated by \code{\link{effect_capability}}).}

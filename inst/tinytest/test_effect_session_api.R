@@ -37,6 +37,27 @@ if (is_linux) {
     expect_true(inherits(e2, "runix_broker_bad_request"))
     expect_equal(e2$detail, "plan_hash")
 
+    ## resource validation is VERB-AWARE. A targeted verb (install/remove/...) with
+    ## an empty resource is a bad_request; a whole-system verb (update/upgrade/
+    ## dist_upgrade/configure) binds no package, carries "" by contract, and must be
+    ## ACCEPTED -- it then proceeds to the transport (a dead socket -> unavailable).
+    ## Regression: the flat `rlen == 0` rejection wrongly failed every whole-system
+    ## commit at open with bad_request:resource (caught by the Part B VM gate).
+    e_res <- tryCatch(
+        effect_session_open(tempfile(fileext = ".sock"), "apt.install", "",
+                            1L, plan_hash, connect_ms = 200L),
+        condition = function(c) c)
+    expect_true(inherits(e_res, "runix_broker_bad_request"))   # targeted: still rejected
+    expect_equal(e_res$detail, "resource")
+
+    e_whole <- tryCatch(
+        effect_session_open(tempfile(fileext = ".sock"), "apt.update", "",
+                            1L, plan_hash, connect_ms = 200L),
+        condition = function(c) c)
+    expect_false(inherits(e_whole, "runix_broker_bad_request"))  # "" ACCEPTED for update
+    expect_true(inherits(e_whole, "runix_broker_unavailable"))   # proceeded to connect
+    expect_equal(e_whole$operation, "apt.update")
+
     ## an unknown apt verb is a hard error from the C closed enum
     expect_error(
         effect_session_open(tempfile(fileext = ".sock"), "apt.frobnicate",
