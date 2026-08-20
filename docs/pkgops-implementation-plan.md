@@ -46,7 +46,7 @@ between 2→3 and 3→4; slice 1 is independent and lands first as the low-risk 
 slice 1  pkgstate::dpkg_selections()        [DONE — pkgstate #10, 0.0.1.9]
 slice 2  runix native effect-session API    [C in common core; critical-path enabler]
 slice 3  pkgops package                      [needs 1 + 2]
-slice 4  rctl apt.* surface                  [needs 3; LAST, per contract §8]
+slice 4  rctl apt.* surface                  [DONE — rctl #12, 0.0.1.8]
 ```
 
 - **Slice 1** unblocks hold/unhold verification and touches nothing risky. Good
@@ -355,6 +355,21 @@ Mirrors the `host.*`/`packages.*` pattern just landed. pkgops is a runtime-detec
 (the mutation; `mut("pkgops", …)`), machine mode surfacing `approval_required` as the
 contract's terminal envelope. Advertised via `rctl capabilities`. Built only once the R
 API is stable.
+
+**DONE (2026-08-20, rctl #12, rctl 0.0.1.8).** 18 operations (nine
+`apt.<verb>-preview` + nine `apt.<verb>`) in `rctl/R/dispatch.R`, plus
+`ERROR_PASSTHROUGH` widened for pkgops's `verb`/`plan_hash`/`status`/
+`effect_issued`/`detail`. As-built refinements: authorization is **always machine
+mode** (`interactive = FALSE`) — rctl runs non-interactively with no polkit agent,
+so a denial or `approval_required` surfaces as a terminal exit-1 envelope, never a
+prompt; `--preview` (the system-wide dry-run flag) returns the advisory and opens
+no intent; and the apt handlers reference pkgops **lazily** (`getExportedValue`
+inside the closure, not `mutation_handler`'s eager `force`) so `operations()` and
+`capabilities` still build with pkgops absent. `apt.configure` is nullary
+(whole-system set = update/upgrade/dist_upgrade/configure). 68 hermetic tests drive
+real pkgops through its own faked seams; proven non-vacuous in CI (the CI also
+gained `libjansson-dev` + `pkgops` in the sibling build). Hermetic-only proof, no
+new VM run. **Slice 4 was the last slice; the arc is functionally complete.**
 
 ---
 
