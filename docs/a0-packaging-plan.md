@@ -26,6 +26,14 @@ before**. Until then the existing `Trusted: yes` channels are **experimental**.
   packages, `shlibs:Depends`, `.buildinfo`) is exactly what a Debian submission
   and A0-release both need — the same source packages feed all of it.
 
+> **apt-arc addendum (2026-08-20) — `a0-apt-arc-addendum.md`.** The CRAN-canonical
+> lean above holds for the **read-only** R packages. The **mutation stack**
+> (`pkgexec` + broker + `pkgops`) is distributed **together through the signed apt
+> repo** as one versioned trust domain (its privileged C artifacts can never be
+> CRAN-hosted), and ships as a **separate opt-in `runix-apt` metapackage** — never
+> folded into `runix-stack`. `pkgops` may later join CRAN optionally. See the
+> addendum for the extended packaging graph and the A0-dev integration scope.
+
 ---
 
 # A0-dev (now)
