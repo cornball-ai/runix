@@ -82,7 +82,7 @@ apt. Getting one wrong is a correctness or safety defect, not a style nit.
 
 Both are executable runbooks in `runix/deploy/`, both run in a **disposable KVM guest**
 (host systemd, polkit, and `SO_PEERCRED` peer identity don't reproduce in a container),
-and **neither ever touches the troy-g5 host** — a freshly provisioned guest only.
+and **neither ever touches the development host** — a freshly provisioned guest only.
 
 - **`deploy/canary-a1-runbook.md`** — the Runix-only slice: the whole mutation boundary
   on a real systemd/polkit host with no Viento in the loop.
@@ -121,9 +121,7 @@ the signed public archive, is deferred.
    tagging, building, and publishing to the cornball apt repo (janssonr's
    pattern) is the deploy gate.
 2. **R-package distribution is an OPEN question — CRAN vs a proper apt/deb repo — and
-   it is Troy's to decide.** He wants a lot more local testing first (replacing the
-   Python admin layer with R is ambitious). **Do NOT start CRAN prep**, and CRAN
-   submission is always Troy's action.
+   it is the maintainer's to decide** after more local testing. **Do NOT start CRAN
+   prep**; CRAN submission is always the maintainer's action.
 
-`docs/container-actuation-seam.md` stays **untracked** in runix — never commit it. And
-never the troy-g5 host.
+Never run either runbook against the development host.
