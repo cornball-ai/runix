@@ -1,3 +1,11 @@
+# runix 0.0.1.14
+
+- Ship the `apt-arc` skill under `inst/skills/apt-arc/`: agent instructions
+  for the audited, polkit-authorized apt-mutation arc across pkgops, pkgexec,
+  pkgstate, the effect-session broker, and the `rctl apt.*` CLI, with the
+  package roles, safety invariants, and canary runbooks. Moved here from the
+  personal skill hub so it versions with the package.
+
 # runix 0.0.1.13
 
 Two native effect-session conformance fixes the disposable-VM (Part B) run caught
