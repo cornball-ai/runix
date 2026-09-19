@@ -1,6 +1,6 @@
 # Canary apt — pkgexec mutation boundary on a real systemd/polkit host
 
-Status: runbook (executable). This is the **destructive VM gate** for two slices:
+Status: runbook (executable). This is the **destructive canary gate** for two slices:
 the pkgexec activation slice (`libapt-pkg-helper-plan.md` §7, contract conformance
 14–21) — the apt-mutation effector (nine root entrypoints + polkit + broker
 effect-receipts) on a real host — and the **pkgops VM-gate increment** Part B
@@ -10,9 +10,14 @@ A1 canary harness (`deploy/canary/`, same disposable KVM guest, same
 ownership-marked teardown); the KVM host's
 NVIDIA/kernel/boot/networking/SSH/container-runtime are never touched.
 
+The default substrate is a disposable KVM guest. An explicitly approved disposable
+physical host can use the local driver below. Both substrates provide real
+systemd, polkit, and SO_PEERCRED; a physical run adds coverage of that host's OS
+and package environment. Never run a payload against the development host.
+
 ## Scope, stated honestly
 
-The R stack **is** installed in the guest (R 4.6 + `janssonr` + `pkgstate` + `runix`
+The R stack **is** installed in the target (R >= 4.4 + `janssonr` + `pkgstate` + `runix`
 + `pkgops`, from pinned staged sources), and the **functional** §7 gates run through
 the real pkgops public path via the VM-only launcher `apt-issue` (`apt-issue.sh` →
 `apt-issue.R`, calling `pkgops::apt_<verb>(apt_<verb>_preview(...))`). So this proves
@@ -144,22 +149,86 @@ of a stale grant.
 
 ## Reproduce
 
-`build-and-stage.sh` refuses to run unless all **five** trees are clean (broker,
-pkgexec, runix, pkgstate, pkgops), `git archive`s from exact commits (so what is
-staged is exactly what is committed and reviewed — including the three R sources
+`build-and-stage.sh` refuses to run unless all **six** trees are clean (broker,
+pkgexec, janssonr, runix, pkgstate, pkgops), `git archive`s from exact commits (so what is
+staged is exactly what is committed and reviewed — including the four R sources
 installed in the guest), and ships SHA-256 sums the guest verifies before building.
 The host is a required argument (no hardcoded default).
 
+Use an isolated clean worktree for harness changes when the development checkout
+contains unrelated work. Do not commit or stash unrelated files to satisfy staging.
+`JANSSONR` overrides the janssonr checkout just as `BROKER`, `PKGEXEC`, `PKGSTATE`,
+and `PKGOPS` override their checkouts. `--local <new-directory>` produces the same
+checksummed staging set without contacting a target.
+
+janssonr is built from its staged source before runix, pkgstate, and pkgops. Its
+source requires R >= 4.4; the old Noble binary's R >= 4.6 dependency does not apply.
+The installer prefers the target archive's compatible R candidate and adds the
+matching CRAN Ubuntu suite only when necessary. It never falls back to a binary
+from another Ubuntu release or unconditionally purges littler.
+
 ```
 # on the workstation (repos committed + clean):
-deploy/canary-apt/build-and-stage.sh <kvm-host>   # git archive + checksums + stage
+bash deploy/canary-apt/build-and-stage.sh <kvm-host>
 
 # on the KVM host as the invoking user:
 deploy/canary/provision.sh                         # boot the disposable guest
-bash ~/canary-apt/apt-canary-guest.sh              # verify sums -> install -> fixtures -> matrix -> gates
-# review ~/canary-apt/evidence-<ts>/ (logs + REDACTED audit projection), then:
+bash <printed-stage-dir>/apt-canary-guest.sh <printed-stage-dir>
+# review <printed-stage-dir>/evidence-* (logs + REDACTED audit projection), then:
 deploy/canary/provision.sh destroy                 # owned guest + storage only
 ```
+
+### Local driver on an approved disposable host
+
+First verify its SSH host key independently and record its hostname and machine-id
+from a trusted console. Supply those expected values literally to the operator
+command; do not derive them from the machine that happens to run the command.
+Run as the ordinary operator with existing sudo access:
+
+```
+bash <stage-dir>/apt-canary-local.sh <stage-dir> <expected-hostname> <expected-machine-id>
+```
+
+The driver verifies identity, checksum coverage, and a fresh baseline before its
+first privileged operation. It refuses existing canary users/uids, the autonomous
+group, previous Runix/canary state, or broken dpkg state. After the operator's
+`sudo -v`, a bounded-interval refresh preserves that existing authentication for
+the run; the harness does not change sudo policy. A root-owned attempt directory
+at `/var/lib/runix-apt-canary` prevents another full attempt on a mutated host.
+**Reprovision the OS for every full retry.** Never delete the marker to retry.
+
+The sequence is install -> fixtures -> polkit matrix -> destructive gates.
+A failed matrix stops before the gates. On normal or catchable failure exits,
+the driver collects redacted audit records, source provenance, checksums, package
+versions/paths, dpkg state and logs, and checks removal of temporary grants,
+pins and sources. It repeats the matrix after cleanup. No automatic dpkg repair
+hides a broken fixture. Power loss or SIGKILL cannot run an EXIT handler; preserve
+the partial evidence and reprovision rather than treating that attempt as passed.
+
+`verify-evidence.sh <evidence-directory>` requires successful matrix/gate logs and
+18 unique gate result rows matched by correlation ID to the durable record. It
+checks the real issuer's post-state/provenance/boolean fields, receipt states,
+preview-side absence of intents, and the interrupted redeemed intent without an
+outcome. Missing exports, mismatches and cleanup errors fail the driver even if
+the mutation gates returned 0. The original VM driver stops on matrix failure too,
+but its historical best-effort export is not this stricter local-driver verdict.
+
+The evidence directory's `SHA256SUMS` covers the final bundle; `INPUT-SHA256SUMS`
+covers the staged inputs. `RESULT` records the phase, exit code, cleanup and
+evidence status. Copy the redacted bundle to persistent storage outside the
+disposable target, verify its checksums, rerun the read-only evidence validator,
+and review the result **before reinstalling the target**. The raw audit sink must
+never be copied off the target. A passing local run is not permission to onboard
+or publish; those remain separate operator decisions.
+
+Local validation of the harness itself (synthetic fixtures and fake sudo only):
+
+```
+bash deploy/canary-apt/test-harness.sh
+```
+
+These checks cover failure sequencing and evidence validation, not the live
+apt/polkit boundary. The actual destructive canary remains mandatory.
 
 ## Cleanup boundary
 

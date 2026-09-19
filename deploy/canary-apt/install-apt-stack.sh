@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install the apt-mutation stack inside the disposable canary guest. Run IN the
-# guest as `ubuntu` (NOPASSWD sudo). The driver stages two pinned source trees in
+# target as the ordinary operator with existing sudo authorization. The driver stages two pinned source trees in
 # $SRC: `runix-audit-broker/` (from HEAD, effect-receipt capable) and `pkgexec/`
 # (from the activation branch). This proves the packaged boundary end to end:
 #   - the broker `.deb` (socket-activated) that issues + redeems effect receipts;
@@ -11,7 +11,7 @@
 #   - the VM-only rab-exercise lifecycle oracle, built from the same source. The
 #     issue-time hash now comes from the PACKAGED runix-apt-preview (the production
 #     planner installed from the .deb), not the root pkgexec-plan diagnostic;
-#   - the R stack (Part B): R 4.6 + janssonr + pkgstate + runix + pkgops (from the
+#   - the R stack (Part B): R >= 4.4 + janssonr + pkgstate + runix + pkgops (from the
 #     staged sources), plus the apt-issue launcher, so the §7 gates drive the REAL
 #     pkgops public path. rab-exercise is RETAINED as the broker/receipt oracle for
 #     the gates the issuer cannot express (G11-G15).
@@ -26,7 +26,7 @@ sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential debhelper fakeroot pkg-config \
     libapt-pkg-dev libjansson-dev libssl-dev \
-    polkitd pkexec dpkg-dev apt-utils jq
+    polkitd pkexec dpkg-dev apt-utils jq curl ca-certificates
 
 log "build + install the audit broker .deb (HEAD: effect-receipt capable)"
 cd "$SRC/runix-audit-broker"
@@ -48,35 +48,29 @@ sudo install -m 0755 "$SRC/runix-audit-broker/rab-exercise" /usr/local/bin/rab-e
 sudo install -m 0755 "$SRC/fcntl-lock.bin" /usr/local/bin/fcntl-lock
 
 # --- the R stack (Part B): drive the gates through the real pkgops public path ---
-# Mirrors deploy/canary/install-stack.sh: R 4.6 from CRAN (Noble ships 4.3, which the
-# janssonr .deb outruns), janssonr from the cornball apt repo, then R CMD INSTALL the
-# staged sources in dependency order (pkgops Imports runix + pkgstate + janssonr).
-log "R 4.6 from the CRAN Ubuntu repo (Noble ships 4.3; the janssonr .deb needs >= 4.6)"
-curl -fsSL https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
-    | sudo tee /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc >/dev/null
-echo "deb https://cloud.r-project.org/bin/linux/ubuntu noble-cran40/" \
-    | sudo tee /etc/apt/sources.list.d/cran.list >/dev/null
-sudo apt-get purge -y littler r-cran-littler >/dev/null 2>&1 || true   # ABI-pinned to R 4.3
-sudo apt-get update -qq
+# Source janssonr needs R >= 4.4, not the published Noble binary's R >= 4.6.
+# Prefer the target archive; add the matching CRAN suite only when necessary.
+log "select a compatible R (janssonr source requires >= 4.4)"
+RCAND=$(LC_ALL=C apt-cache policy r-base-core | awk '/Candidate:/ {print $2}')
+if [ "$RCAND" = '(none)' ] || [ -z "$RCAND" ] || ! dpkg --compare-versions "$RCAND" ge 4.4.0; then
+    . /etc/os-release
+    [ "${ID:-}" = ubuntu ] && [[ ${VERSION_CODENAME:-} =~ ^[a-z]+$ ]] \
+        || { echo 'unsupported OS for CRAN Ubuntu bootstrap' >&2; exit 1; }
+    CRAN="https://cloud.r-project.org/bin/linux/ubuntu"
+    curl -fsSL "$CRAN/$VERSION_CODENAME-cran40/Release" >/dev/null
+    curl -fsSL "$CRAN/marutter_pubkey.asc" \
+        | sudo tee /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc >/dev/null
+    printf 'deb %s %s-cran40/\n' "$CRAN" "$VERSION_CODENAME" \
+        | sudo tee /etc/apt/sources.list.d/cran.list >/dev/null
+    sudo apt-get update -qq
+fi
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     r-base-core r-base-dev
-echo "  $(R --version | head -1)"
+Rscript --vanilla -e 'stopifnot(getRversion() >= "4.4.0"); cat(R.version.string, "\n")'
 
-log "janssonr from the cornball apt repository (runix's one Import)"
-sudo tee /etc/apt/sources.list.d/janssonr.sources >/dev/null <<'EOF'
-Types: deb
-URIs: https://cornball-ai.github.io/janssonr
-Suites: noble
-Components: main
-Trusted: yes
-Enabled: yes
-EOF
-sudo apt-get update -qq
-sudo apt-get install -y r-cornball-janssonr
-
-log "install the R packages from the staged sources (runix + pkgstate, then pkgops)"
+log "install pinned R sources: janssonr -> runix -> pkgstate -> pkgops"
 cd "$SRC"
-for p in runix pkgstate pkgops; do
+for p in janssonr runix pkgstate pkgops; do
     rm -rf "$p" && tar xzf "$p.tar.gz"
     sudo R CMD INSTALL "$p"
 done
@@ -134,7 +128,7 @@ echo "  broker: $(dpkg-query -W -f='${Version}' runix-audit-broker 2>/dev/null)"
 echo "  pkgexec: $(dpkg-query -W -f='${Version}' pkgexec 2>/dev/null)"
 # the R stack + apt-issue launcher (Part B). pkgops must load with its Imports.
 for p in janssonr runix pkgstate pkgops; do
-    v=$(Rscript -e "cat(as.character(packageVersion('$p')))" 2>/dev/null) \
+    v=$(Rscript --vanilla -e "ns <- loadNamespace('$p'); cat(as.character(getNamespaceVersion(ns)), getNamespaceInfo(ns, 'path'))" 2>/dev/null) \
         && echo "  R $p $v" || { echo "  MISSING R package $p"; fail=1; }
 done
 { command -v apt-issue >/dev/null && [ -f /usr/local/bin/apt-issue.R ]; } \
