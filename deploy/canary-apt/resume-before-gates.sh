@@ -1,5 +1,5 @@
 #!/bin/bash
-# Only continue a completed bootstrap whose destructive gates never started.
+# Continue a completed bootstrap, or explicitly repeat completed, cleaned gates.
 # Called by the identity-checked local driver; never reads the old matrix log.
 set -euo pipefail
 [ "$#" -eq 4 ] || exit 2
@@ -8,7 +8,24 @@ STAGE=$2
 OLD=$3
 EVID=$4
 die() { echo "REFUSING continuation: $*" >&2; exit 1; }
-case "$MODE" in check|refresh) ;; *) exit 2;; esac
+REPEAT=0
+case "$MODE" in
+    check|refresh) ;;
+    check-repeat|refresh-repeat)
+        REPEAT=1
+        MODE=${MODE%-repeat}
+        COMPLETED=$EVID
+        bash "$STAGE/check-completed-gates.sh" "$COMPLETED"
+        [ "$(head -1 "$COMPLETED/host.txt")" = "$(hostname)" ] || die 'completed hostname mismatch'
+        [ "$(sed -n '2p' "$COMPLETED/host.txt")" = "$(cat /etc/machine-id)" ] || die 'completed machine-id mismatch'
+        mapfile -t prior < "$COMPLETED/resumed-from.txt"
+        [ "${#prior[@]}" -eq 2 ] && [ "${prior[0]}" = "$OLD" ] || die 'previous setup path mismatch'
+        EVID=$(realpath -e "${prior[1]}")
+        cmp "$COMPLETED/PREVIOUS-MANIFEST" "$EVID/MANIFEST" || die 'previous setup manifest mismatch'
+        cmp "$COMPLETED/PREVIOUS-INPUT-SHA256SUMS" "$EVID/INPUT-SHA256SUMS" || die 'previous setup checksums mismatch'
+        ;;
+    *) exit 2;;
+esac
 
 for f in MANIFEST INPUT-SHA256SUMS host.txt 01-install.log 02-fixtures.log; do
     [ -s "$EVID/$f" ] || die "missing previous setup evidence: $f"
@@ -26,6 +43,10 @@ for source in broker pkgexec; do
     current=$(awk -v s="$source" '$1 == s {print $2}' "$STAGE/MANIFEST")
     [[ "$prior" =~ ^[0-9a-f]{40}$ ]] && [ "$prior" = "$current" ] \
         || die "native source changed: $source"
+    if [ "$REPEAT" -eq 1 ]; then
+        completed=$(awk -v s="$source" '$1 == s {print $2}' "$COMPLETED/MANIFEST")
+        [ "$completed" = "$current" ] || die "completed native source changed: $source"
+    fi
 done
 [ "$(id -u aptbot)" = 1002 ] && [ "$(id -u aptuser)" = 1003 ] || die 'fixture uid mismatch'
 [ "$(getent group runix-apt-autonomous | cut -d: -f4)" = aptbot ] || die 'unexpected autonomous members'
@@ -60,8 +81,16 @@ fi
 # Check root-only state with root credentials, before changing anything. Keep
 # the original attempt marker; an atomic second marker permits ONE continuation.
 sudo -n test -d /var/lib/runix-apt-canary || die 'previous attempt marker missing'
-for p in /var/lib/runix-apt-canary/gates-started \
-         /etc/polkit-1/rules.d/49-canary-apt-temp.rules \
+if [ "$REPEAT" -eq 1 ]; then
+    sudo -n test -d /var/lib/runix-apt-canary/gates-started || die 'previous gates marker missing'
+    sudo -n test -d /var/lib/runix-apt-canary/resume-before-gates || die 'previous continuation marker missing'
+    previous_hash=$(sha256sum "$COMPLETED/SHA256SUMS" | cut -d' ' -f1)
+    ATTEMPT=/var/lib/runix-apt-canary/repeat-clean-gates-$previous_hash
+else
+    sudo -n test ! -e /var/lib/runix-apt-canary/gates-started || die 'previous gates already started'
+    ATTEMPT=/var/lib/runix-apt-canary/resume-before-gates
+fi
+for p in /etc/polkit-1/rules.d/49-canary-apt-temp.rules \
          /etc/apt/preferences.d/99-canary-g5-pin \
          /etc/apt/sources.list.d/canary-broken.sources \
          /etc/apt/sources.list.d/canary-drift.sources \
@@ -72,7 +101,7 @@ for lock in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lo
     sudo -n test -f "$lock" || die "missing apt/dpkg lock file: $lock"
     sudo -n fcntl-lock "$lock" 0 || die "apt/dpkg lock is held: $lock"
 done
-sudo -n mkdir /var/lib/runix-apt-canary/resume-before-gates \
+sudo -n mkdir "$ATTEMPT" \
     || die 'a continuation was already attempted; inspect its evidence first'
 
 BUILD=$(mktemp -d)

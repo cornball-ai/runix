@@ -233,9 +233,28 @@ copied. Only after those checks does it reinstall the four pinned R sources,
 refresh apt indexes, and verify the R versions loaded by `aptbot`. A fresh
 authorization matrix still gates all destructive tests. Evidence labels the run
 `resume-before-gates` and includes the previous manifest and input checksums.
-Failures after destructive gates began need a separately reviewed reset of the
-affected fixture state, or a fresh OS baseline; this continuation cannot bypass
-that state.
+
+If that continuation completed every gate and cleanup but failed audit evidence
+acceptance, preserve and verify its evidence off-box, repair the issuer, and use
+the separate completed-run repeat mode:
+
+```
+bash <stage-dir>/apt-canary-local.sh <stage-dir> <expected-hostname> <expected-machine-id> \
+  --repeat-clean-gates <original-bootstrap-stage-dir> <completed-evidence-dir>
+```
+
+This mode checks the completed evidence checksums, both successful matrices,
+successful gates, clean cleanup/export/dpkg results, and identical package state
+before and after the prior run. It validates the original bootstrap provenance
+and repeats all current fixture/native-stack checks. It refuses leftover gate
+packages or temporary policy/source changes and never resets broken dpkg state.
+Original attempt markers and evidence remain intact; a new root marker allows
+one repeat for that completed evidence bundle. R sources refresh, authorization,
+gates, cleanup, and full audit acceptance all run again with new correlation IDs.
+Incomplete runs or failed cleanup still need a separately reviewed repair/reset.
+
+Local controls: `test-harness.sh`, `test-completed-gates.sh`,
+`test-polkit-matrix.sh`, and `test-machine-refusal.R` in `deploy/canary-apt/`.
 
 The sequence is install -> fixtures -> polkit matrix -> destructive gates.
 A failed matrix stops before the gates. On normal or catchable failure exits,

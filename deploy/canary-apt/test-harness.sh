@@ -70,6 +70,10 @@ case "$*" in
         [ "$TEST_MODE" != gate_marker_exists ] || exit 1
         mkdir "$TESTROOT/attempt-marker/gates-started" ;;
     '-n mkdir /var/lib/runix-apt-canary/resume-before-gates') mkdir "$TESTROOT/attempt-marker/resume-before-gates" ;;
+    '-n mkdir /var/lib/runix-apt-canary/repeat-clean-gates-'*)
+        target=${3#/var/lib/runix-apt-canary/}
+        [ "$TEST_MODE" != gate_marker_exists ] || exit 1
+        mkdir "$TESTROOT/attempt-marker/$target" ;;
     '-n cat /var/log/runix/audit.jsonl')
         [ "$TEST_MODE" != export_fail ] || exit 1
         cat "$TESTROOT/audit-raw.jsonl" ;;
@@ -130,9 +134,14 @@ cat > "$TESTROOT/stage/resume-before-gates.sh" <<'EOF'
 #!/bin/bash
 set -e
 case "$1" in
-    check) [ "$TEST_MODE" != resume_check_fail ] ;;
-    refresh)
-        sudo -n mkdir /var/lib/runix-apt-canary/resume-before-gates
+    check|check-repeat) [ "$TEST_MODE" != resume_check_fail ] ;;
+    refresh|refresh-repeat)
+        if [ "$1" = refresh-repeat ]; then
+            hash=$(sha256sum "$4/SHA256SUMS" | cut -d' ' -f1)
+            sudo -n mkdir "/var/lib/runix-apt-canary/repeat-clean-gates-$hash"
+        else
+            sudo -n mkdir /var/lib/runix-apt-canary/resume-before-gates
+        fi
         touch "$TESTROOT/refresh-ran"
         [ "$TEST_MODE" != resume_setup_fail ] ;;
     *) exit 99 ;;
@@ -156,7 +165,7 @@ chmod +x "$TESTROOT/bin/"*
 for p in runix-audit-broker pkgexec janssonr runix pkgstate pkgops; do
     tar -czf "$TESTROOT/stage/$p.tar.gz" -T /dev/null
 done
-for f in MANIFEST apt-issue.sh apt-issue.R machine-refusal.R fcntl-lock.c; do printf 'synthetic\n' > "$TESTROOT/stage/$f"; done
+for f in MANIFEST apt-issue.sh apt-issue.R machine-refusal.R check-completed-gates.sh fcntl-lock.c; do printf 'synthetic\n' > "$TESTROOT/stage/$f"; done
 (cd "$TESTROOT/stage" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
     | sort | xargs sha256sum > SHA256SUMS)
 # Use a clean private HOME for each invocation; never edit the real HOME.
@@ -204,10 +213,11 @@ ok 'attempt marker prevents a second run'
 mkdir "$TESTROOT/previous-stage" "$TESTROOT/previous-evidence"
 cp "$TESTROOT/stage/MANIFEST" "$TESTROOT/previous-evidence/MANIFEST"
 cp "$TESTROOT/stage/SHA256SUMS" "$TESTROOT/previous-evidence/INPUT-SHA256SUMS"
+cp "$TESTROOT/stage/SHA256SUMS" "$TESTROOT/previous-evidence/SHA256SUMS"
 run_resume() {
     env PATH="$TESTROOT/bin:$PATH" HOME="$TESTROOT/home" TEST_MODE="$1" \
         bash "$TESTROOT/stage/apt-canary-local.sh" "$TESTROOT/stage" \
-        synthetic-disposable aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --resume-before-gates \
+        synthetic-disposable aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${2:---resume-before-gates}" \
         "$TESTROOT/previous-stage" "$TESTROOT/previous-evidence"
 }
 for mode in resume_check_fail resume_setup_fail matrix_fail gate_marker_exists good; do
@@ -236,4 +246,35 @@ for mode in resume_check_fail resume_setup_fail matrix_fail gate_marker_exists g
 done
 expect_failure run_resume good
 ok 'continuation marker prevents a repeated resume'
+for mode in resume_check_fail resume_setup_fail matrix_fail export_fail good; do
+    rm -f "$TESTROOT/gates-ran" "$TESTROOT/sudo-calls" "$TESTROOT/bootstrap-ran" \
+        "$TESTROOT/fixtures-ran" "$TESTROOT/refresh-ran"
+    rm -r "$TESTROOT/attempt-marker"
+    mkdir "$TESTROOT/attempt-marker"
+    mkdir "$TESTROOT/attempt-marker/gates-started" "$TESTROOT/attempt-marker/resume-before-gates"
+    if [ "$mode" = good ]; then
+        run_resume "$mode" --repeat-clean-gates > "$TESTROOT/last-output" 2>&1
+    else
+        expect_failure run_resume "$mode" --repeat-clean-gates
+    fi
+    [ ! -e "$TESTROOT/bootstrap-ran" ] && [ ! -e "$TESTROOT/fixtures-ran" ]
+    [ -d "$TESTROOT/attempt-marker/gates-started" ]
+    [ -d "$TESTROOT/attempt-marker/resume-before-gates" ]
+    if [ "$mode" = resume_check_fail ]; then
+        [ ! -e "$TESTROOT/sudo-calls" ] && [ ! -e "$TESTROOT/refresh-ran" ]
+    else
+        evid=$(awk '/^Evidence:/ {print $2}' "$TESTROOT/last-output" | tail -1)
+        grep -Fxq 'run_mode=repeat-clean-gates' "$evid/RESULT"
+        cmp "$TESTROOT/previous-evidence/MANIFEST" "$evid/PREVIOUS-MANIFEST"
+        (cd "$evid" && sha256sum --strict -c SHA256SUMS >/dev/null)
+    fi
+    if [ "$mode" = good ] || [ "$mode" = export_fail ]; then
+        [ -e "$TESTROOT/gates-ran" ]
+    else
+        [ ! -e "$TESTROOT/gates-ran" ]
+    fi
+    ok "repeat $mode: fresh matrix, preserved markers and new evidence"
+done
+expect_failure run_resume good --repeat-clean-gates
+ok 'one repeat per completed evidence bundle'
 echo "$pass harness checks passed"

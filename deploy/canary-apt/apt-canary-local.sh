@@ -6,17 +6,27 @@ set -euo pipefail
 # Build/fixture directories become package contents and must be world-readable.
 # Evidence privacy comes from mktemp's mode-0700 directory, not a build-wide mask.
 umask 022
-[ "$#" -eq 3 ] || [ "$#" -eq 6 ] || { echo "usage: $0 <stage-dir> <expected-hostname> <expected-machine-id> [--resume-before-gates <previous-stage> <previous-evidence>]" >&2; exit 2; }
+[ "$#" -eq 3 ] || [ "$#" -eq 6 ] || { echo "usage: $0 <stage-dir> <expected-hostname> <expected-machine-id> [--resume-before-gates|--repeat-clean-gates <bootstrap-stage> <previous-evidence>]" >&2; exit 2; }
 STAGEDIR=$(realpath -e "$1")
 EXPECTED_HOST=$2
 EXPECTED_ID=$3
 die() { echo "REFUSING: $*" >&2; exit 1; }
 RUN_MODE=fresh
 if [ "$#" -eq 6 ]; then
-    [ "$4" = --resume-before-gates ] || die 'unknown continuation option'
-    RUN_MODE=resume-before-gates
+    case "$4" in
+        --resume-before-gates) RUN_MODE=resume-before-gates ;;
+        --repeat-clean-gates) RUN_MODE=repeat-clean-gates ;;
+        *) die 'unknown continuation option' ;;
+    esac
     PREVIOUS_STAGE=$(realpath -e "$5")
     PREVIOUS_EVIDENCE=$(realpath -e "$6")
+fi
+HELPER_SUFFIX=''
+GATE_MARKER=/var/lib/runix-apt-canary/gates-started
+if [ "$RUN_MODE" = repeat-clean-gates ]; then
+    HELPER_SUFFIX=-repeat
+    previous_hash=$(sha256sum "$PREVIOUS_EVIDENCE/SHA256SUMS" | cut -d' ' -f1)
+    GATE_MARKER=/var/lib/runix-apt-canary/repeat-clean-gates-$previous_hash/gates-started
 fi
 [[ "$EXPECTED_ID" =~ ^[0-9a-f]{32}$ ]] || die 'invalid expected machine-id'
 [ "$(hostname)" = "$EXPECTED_HOST" ] || die 'hostname mismatch'
@@ -51,7 +61,7 @@ fi
 cd "$STAGEDIR"
 # An omitted checksum must not turn an unverified payload into a trusted one.
 for f in MANIFEST apt-canary-local.sh install-apt-stack.sh apt-fixtures.sh \
-         polkit-matrix.sh machine-refusal.R resume-before-gates.sh apt-gates.sh redact.jq verify-evidence.sh verify-evidence.jq \
+         polkit-matrix.sh machine-refusal.R resume-before-gates.sh check-completed-gates.sh apt-gates.sh redact.jq verify-evidence.sh verify-evidence.jq \
          apt-issue.sh apt-issue.R fcntl-lock.c \
          runix-audit-broker.tar.gz pkgexec.tar.gz janssonr.tar.gz runix.tar.gz \
          pkgstate.tar.gz pkgops.tar.gz; do
@@ -59,14 +69,14 @@ for f in MANIFEST apt-canary-local.sh install-apt-stack.sh apt-fixtures.sh \
         || die "missing checksum: $f"
 done
 sha256sum --strict -c SHA256SUMS
-if [ "$RUN_MODE" = resume-before-gates ]; then
-    bash "$STAGEDIR/resume-before-gates.sh" check "$STAGEDIR" "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE"
+if [ "$RUN_MODE" != fresh ]; then
+    bash "$STAGEDIR/resume-before-gates.sh" "check$HELPER_SUFFIX" "$STAGEDIR" "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE"
 fi
 mkdir -p "$HOME/canary-apt"
 EVID=$(mktemp -d "$HOME/canary-apt/evidence-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 cp MANIFEST "$EVID/MANIFEST"
 cp SHA256SUMS "$EVID/INPUT-SHA256SUMS"
-if [ "$RUN_MODE" = resume-before-gates ]; then
+if [ "$RUN_MODE" != fresh ]; then
     cp "$PREVIOUS_EVIDENCE/MANIFEST" "$EVID/PREVIOUS-MANIFEST"
     cp "$PREVIOUS_EVIDENCE/INPUT-SHA256SUMS" "$EVID/PREVIOUS-INPUT-SHA256SUMS"
     printf '%s\n' "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE" > "$EVID/resumed-from.txt"
@@ -155,13 +165,13 @@ bash "$STAGEDIR/apt-fixtures.sh" 2>&1 | tee "$EVID/02-fixtures.log"
 else
     PHASE=resume-setup
     MUTATION_STARTED=1
-    bash "$STAGEDIR/resume-before-gates.sh" refresh "$STAGEDIR" "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE" \
+    bash "$STAGEDIR/resume-before-gates.sh" "refresh$HELPER_SUFFIX" "$STAGEDIR" "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE" \
         2>&1 | tee "$EVID/01-resume-setup.log"
 fi
 PHASE=matrix
 bash "$STAGEDIR/polkit-matrix.sh" 2>&1 | tee "$EVID/03-matrix.log"
 PHASE=gates
-sudo -n mkdir /var/lib/runix-apt-canary/gates-started
+sudo -n mkdir "$GATE_MARKER"
 GATES_STARTED=1
 bash "$STAGEDIR/apt-gates.sh" 2>&1 | tee "$EVID/04-gates.log"
 PHASE=complete
