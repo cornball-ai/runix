@@ -17,8 +17,12 @@ jq -n -f "$HERE/test-evidence-fixture.jq" > "$TESTROOT/fixture.json"
 jq -c '.audit[]' "$TESTROOT/fixture.json" > "$TESTROOT/good/audit-redacted.jsonl"
 jq -c '.audit[] | if .record_type == "broker_receipt" then .state=.receipt_state | del(.receipt_state) else . end' \
     "$TESTROOT/fixture.json" > "$TESTROOT/audit-raw.jsonl"
-printf '==== polkit matrix: 23 passed, 0 failed ====\n' > "$TESTROOT/good/03-matrix.log"
-cp "$TESTROOT/good/03-matrix.log" "$TESTROOT/good/05-matrix-after.log"
+for index in 0 1; do
+    if [ "$index" = 0 ]; then log=03-matrix.log; else log=05-matrix-after.log; fi
+    jq -r --argjson index "$index" '.refusals[$index] | "MACHINE_REFUSAL cid=\(.cid) status=\(.status) effect_issued=false effect_session_opened=false"' \
+        "$TESTROOT/fixture.json" > "$TESTROOT/good/$log"
+    printf '==== polkit matrix: 23 passed, 0 failed ====\n' >> "$TESTROOT/good/$log"
+done
 {
     jq -r '.calls[] | "EVIDENCE " + tojson' "$TESTROOT/fixture.json"
     for g in G11a G11b G-NEG G-PREV-OWN G-PREV-NOOP; do echo "  PASS  $g fixture"; done
@@ -43,6 +47,8 @@ bad_audit 'fabricated update transition' 'if .correlation_id=="fixture-G1" and .
 bad_audit 'unredeemed interruption' 'if .correlation_id=="fixture-G-INT" and .record_type=="broker_receipt" then .receipt_state="issued" else . end'
 bad_audit 'secret in projection' '. + {binding:"synthetic-secret"}'
 bad_audit 'empty audit' 'empty'
+bad_audit 'missing P4 refusal audit' 'select(.correlation_id != "fixture-P4-before")'
+bad_audit 'P4 receipt minting' '., (select(.correlation_id == "fixture-P4-before" and .phase == "intent") | {record_type:"broker_receipt",correlation_id:.correlation_id,receipt_state:"issued"})'
 cp -r "$TESTROOT/good" "$TESTROOT/bad"
 printf 'EVIDENCE {broken-json\n' >> "$TESTROOT/bad/04-gates.log"
 expect_failure bash "$HERE/verify-evidence.sh" "$TESTROOT/bad"
@@ -117,7 +123,11 @@ EOF
 cat > "$TESTROOT/stage/polkit-matrix.sh" <<'EOF'
 #!/bin/bash
 [ "$TEST_MODE" != matrix_fail ] || exit 22
-cat "$TESTROOT/good/03-matrix.log"
+if [ -e "$TESTROOT/gates-ran" ]; then
+    cat "$TESTROOT/good/05-matrix-after.log"
+else
+    cat "$TESTROOT/good/03-matrix.log"
+fi
 EOF
 cat > "$TESTROOT/stage/apt-gates.sh" <<'EOF'
 #!/bin/bash
@@ -128,7 +138,7 @@ chmod +x "$TESTROOT/bin/"*
 for p in runix-audit-broker pkgexec janssonr runix pkgstate pkgops; do
     tar -czf "$TESTROOT/stage/$p.tar.gz" -T /dev/null
 done
-for f in MANIFEST apt-issue.sh apt-issue.R fcntl-lock.c; do printf 'synthetic\n' > "$TESTROOT/stage/$f"; done
+for f in MANIFEST apt-issue.sh apt-issue.R machine-refusal.R fcntl-lock.c; do printf 'synthetic\n' > "$TESTROOT/stage/$f"; done
 (cd "$TESTROOT/stage" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
     | sort | xargs sha256sum > SHA256SUMS)
 # Use a clean private HOME for each invocation; never edit the real HOME.

@@ -41,7 +41,7 @@ done
 cd "$STAGEDIR"
 # An omitted checksum must not turn an unverified payload into a trusted one.
 for f in MANIFEST apt-canary-local.sh install-apt-stack.sh apt-fixtures.sh \
-         polkit-matrix.sh apt-gates.sh redact.jq verify-evidence.sh verify-evidence.jq \
+         polkit-matrix.sh machine-refusal.R apt-gates.sh redact.jq verify-evidence.sh verify-evidence.jq \
          apt-issue.sh apt-issue.R fcntl-lock.c \
          runix-audit-broker.tar.gz pkgexec.tar.gz janssonr.tar.gz runix.tar.gz \
          pkgstate.tar.gz pkgops.tar.gz; do

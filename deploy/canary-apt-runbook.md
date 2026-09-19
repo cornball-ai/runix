@@ -104,8 +104,27 @@ runtime is VM-only.
 1. non-member `aptuser` denied the autonomous verbs;
 2. member `aptbot` allowed **only** `update` + `hold` (machine mode, no prompt);
 3. member still denied `unhold` and every package-changing verb;
-4. machine mode never prompts (bounded `pkcheck`/`pkexec`, no agent);
+4. machine mode refuses before effect-session open: real noninteractive `pkcheck`
+   and `pkgops::apt_install(..., interactive = FALSE)`;
 5. all nine entrypoint paths root-owned and not group/world-writable.
+
+P4 keeps the real planner, authorization check and broker refusal audit. Its
+canary-only tripwire replaces effect-session open, failing if authorization
+unexpectedly allows the request. It cannot mint an effect receipt or enter
+`pkexec`. The refusal correlation ID is logged. This proof requires the broker;
+it does not exercise an authorized commit. Directly invoking `pkexec` here would
+allow authentication prompts, even with stdin redirected, and is prohibited.
+Every authorization probe runs under a root-owned 15-second `timeout` inside
+`sudo -n`, with a 2-second KILL escalation and `runuser` dropping to the principal.
+A supervisor/tooling failure is a failure, never a policy denial. Evidence
+validation requires each P4 correlation ID to match a plain intent and an
+effect-free refusal outcome from `aptbot`, with no effect receipt.
+
+Local controls: `test-polkit-matrix.sh` runs the actual matrix under a PTY with
+fake privilege/policy tools, including sudo failure and a TERM-resistant process.
+`Rscript --vanilla test-machine-refusal.R machine-refusal.R` exercises the actual
+probe with all external operations stubbed, including unexpected authorization
+and audit failure. These checks do not replace the real target matrix.
 
 ### §7 gates (`apt-gates.sh`)
 

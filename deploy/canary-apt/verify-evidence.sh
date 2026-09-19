@@ -18,7 +18,13 @@ for gate in G11a G11b G-NEG G-PREV-OWN G-PREV-NOOP; do
     grep -Eq "^  PASS  $gate " "$EVID/04-gates.log"
 done
 CALLS=$(mktemp)
-trap 'rm -f "$CALLS"' EXIT
+REFUSALS=$(mktemp)
+trap 'rm -f "$CALLS" "$REFUSALS"' EXIT
+for f in 03-matrix.log 05-matrix-after.log; do
+    awk '/^MACHINE_REFUSAL / {n++; print} END {exit (n != 1)}' "$EVID/$f" \
+        | jq -Rc 'split(" ")[1:] | map(split("=") | {key:.[0], value:.[1]}) | from_entries' \
+        >> "$REFUSALS"
+done
 awk '/^EVIDENCE / {print substr($0,10)}' "$EVID/04-gates.log" > "$CALLS"
-jq -s -e --slurpfile calls "$CALLS" -f "$HERE/verify-evidence.jq" \
+jq -s -e --slurpfile calls "$CALLS" --slurpfile refusals "$REFUSALS" -f "$HERE/verify-evidence.jq" \
     "$EVID/audit-redacted.jsonl"

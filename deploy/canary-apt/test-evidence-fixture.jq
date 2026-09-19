@@ -45,3 +45,11 @@ def call($g;$v;$s;$e): {gate:$g,backend:"issuer",verb:$v,status:$s,effect:$e,
         | .changed=false | .state_changed=($c.gate=="G6")
       else . end)
 ]}
+| .refusals = [
+    {cid:"fixture-P4-before",status:"approval_required",effect_issued:"false",effect_session_opened:"false"},
+    {cid:"fixture-P4-after",status:"approval_required",effect_issued:"false",effect_session_opened:"false"}]
+| .audit += [.refusals[] |
+    {correlation_id:.cid,actor:"uid:1002",phase:"intent",operation:"apt.install",
+      outcome:"intent",effect_issued:false},
+    {correlation_id:.cid,actor:"uid:1002",phase:"outcome",operation:"apt.install",
+      outcome:"approval_required",effect_issued:false}]

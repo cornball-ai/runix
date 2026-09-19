@@ -72,6 +72,21 @@ def check_call($c; $audit):
           | if $c.backend == "issuer" then $outcome[0] | post_state($c) else . end
         end
     end;
+def check_refusal($c; $audit):
+  require(($c | keys) == ["cid","effect_issued","effect_session_opened","status"]
+      and ($c.cid | test("^[A-Za-z0-9_-]+$"))
+      and ($c.status == "unauthorized" or $c.status == "approval_required")
+      and $c.effect_issued == "false" and $c.effect_session_opened == "false";
+      "P4: invalid machine refusal")
+  | [$audit[] | select(.correlation_id == $c.cid)] as $records
+  | [$records[] | select(.phase == "intent")] as $intent
+  | [$records[] | select(.phase == "outcome")] as $outcome
+  | require(($records | length) == 2 and ($intent | length) == 1
+      and ($outcome | length) == 1
+      and all($records[]; .actor == "uid:1002" and .operation == "apt.install"
+        and .effect_issued == false)
+      and $intent[0].outcome == "intent" and $outcome[0].outcome == $c.status;
+      "P4: missing refusal audit, wrong identity, or unexpected receipt");
 . as $audit
 | require(length > 0; "empty audit export")
 | require(all(.[];
@@ -82,6 +97,9 @@ def check_call($c; $audit):
       (keys - ["record_type","correlation_id","receipt_state"] | length) == 0
     else keys == ["record_type"] end); "unredacted audit fields")
 | specifications as $specs
+| require(($refusals | length) == 2 and ([$refusals[].cid] | unique | length) == 2;
+    "P4: missing or reused refusal correlation ID")
+| reduce $refusals[] as $r (. ; check_refusal($r; $audit))
 | require(($calls | length) == ($specs | length); "missing or extra gate result")
 | require(([$calls[] | select(.outcome != "preview_refused") | .cid] | length)
     == ([$calls[] | select(.outcome != "preview_refused") | .cid] | unique | length);
@@ -94,4 +112,4 @@ def check_call($c; $audit):
         $s[0] + ": result contract mismatch")
     | check_call($c; $audit)
     | $s[0] ]
-| {verified_gates: ., count: length}
+| {verified_gates: ., count: length, verified_machine_refusals: 2}
