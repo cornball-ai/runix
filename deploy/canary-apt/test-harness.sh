@@ -1,0 +1,280 @@
+#!/bin/bash
+# Local synthetic checks. No apt, polkit, broker, SSH, or privileged command runs.
+set -euo pipefail
+HERE=$(dirname "$(readlink -f "$0")")
+TESTROOT=$(mktemp -d)
+export TESTROOT
+trap 'rc=$?; if [ "$rc" -ne 0 ] && [ -f "$TESTROOT/last-output" ]; then cat "$TESTROOT/last-output" >&2; fi; rm -rf "$TESTROOT"; exit "$rc"' EXIT
+pass=0
+ok() { echo "PASS $*"; pass=$((pass+1)); }
+expect_failure() {
+    if "$@" > "$TESTROOT/last-output" 2>&1; then
+        echo "unexpected success: $*" >&2; exit 1
+    fi
+}
+mkdir "$TESTROOT/good"
+jq -n -f "$HERE/test-evidence-fixture.jq" > "$TESTROOT/fixture.json"
+jq -c '.audit[]' "$TESTROOT/fixture.json" > "$TESTROOT/good/audit-redacted.jsonl"
+jq -c '.audit[] | if .record_type == "broker_receipt" then .state=.receipt_state | del(.receipt_state) else . end' \
+    "$TESTROOT/fixture.json" > "$TESTROOT/audit-raw.jsonl"
+for index in 0 1; do
+    if [ "$index" = 0 ]; then log=03-matrix.log; else log=05-matrix-after.log; fi
+    jq -r --argjson index "$index" '.refusals[$index] | "MACHINE_REFUSAL cid=\(.cid) status=\(.status) effect_issued=false effect_session_opened=false"' \
+        "$TESTROOT/fixture.json" > "$TESTROOT/good/$log"
+    printf '==== polkit matrix: 23 passed, 0 failed ====\n' >> "$TESTROOT/good/$log"
+done
+{
+    jq -r '.calls[] | "EVIDENCE " + tojson' "$TESTROOT/fixture.json"
+    for g in G11a G11b G-NEG G-PREV-OWN G-PREV-NOOP; do echo "  PASS  $g fixture"; done
+    echo '==== §7 apt-mutation gates: 70 passed, 0 failed ===='
+} > "$TESTROOT/good/04-gates.log"
+bash "$HERE/verify-evidence.sh" "$TESTROOT/good" >/dev/null
+ok 'valid synthetic evidence accepted'
+
+bad_audit() {
+    local label=$1 filter=$2
+    cp -r "$TESTROOT/good" "$TESTROOT/bad"
+    jq -c "$filter" "$TESTROOT/good/audit-redacted.jsonl" > "$TESTROOT/bad/audit-redacted.jsonl"
+    expect_failure bash "$HERE/verify-evidence.sh" "$TESTROOT/bad"
+    rm -r "$TESTROOT/bad"
+    ok "$label rejected"
+}
+bad_audit 'missing durable outcome' 'select(.correlation_id != "fixture-G3" or .phase != "outcome")'
+bad_audit 'wrong actor' 'if .correlation_id=="fixture-G3" and .phase=="outcome" then .actor="uid:0" else . end'
+bad_audit 'wrong post-state' 'if .correlation_id=="fixture-G3" and .phase=="outcome" then .observed["canary-benign:all"].version="9" else . end'
+bad_audit 'false effect report' 'if .correlation_id=="fixture-G3" and .phase=="outcome" then .effect_issued=false else . end'
+bad_audit 'fabricated update transition' 'if .correlation_id=="fixture-G1" and .phase=="outcome" then .state_changed=true else . end'
+bad_audit 'unredeemed interruption' 'if .correlation_id=="fixture-G-INT" and .record_type=="broker_receipt" then .receipt_state="issued" else . end'
+bad_audit 'secret in projection' '. + {binding:"synthetic-secret"}'
+bad_audit 'empty audit' 'empty'
+bad_audit 'missing P4 refusal audit' 'select(.correlation_id != "fixture-P4-before")'
+bad_audit 'P4 receipt minting' '., (select(.correlation_id == "fixture-P4-before" and .phase == "intent") | {record_type:"broker_receipt",correlation_id:.correlation_id,receipt_state:"issued"})'
+cp -r "$TESTROOT/good" "$TESTROOT/bad"
+printf 'EVIDENCE {broken-json\n' >> "$TESTROOT/bad/04-gates.log"
+expect_failure bash "$HERE/verify-evidence.sh" "$TESTROOT/bad"
+rm -r "$TESTROOT/bad"
+ok 'corrupt gate result rejected'
+
+# Staged payload stubs and an exhaustive sudo fake exercise the real driver's
+# sequencing/exit handler. Unhandled sudo commands fail, never delegate to sudo.
+mkdir "$TESTROOT/bin" "$TESTROOT/stage" "$TESTROOT/home"
+cp "$HERE/apt-canary-local.sh" "$HERE/verify-evidence.sh" "$HERE/verify-evidence.jq" \
+    "$HERE/redact.jq" "$TESTROOT/stage/"
+cat > "$TESTROOT/bin/sudo" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$TESTROOT/sudo-calls"
+case "$*" in
+    '-v'|'-n -v') exit 0 ;;
+    '-n mkdir /var/lib/runix-apt-canary') mkdir "$TESTROOT/attempt-marker" ;;
+    '-n mkdir /var/lib/runix-apt-canary/gates-started')
+        [ "$TEST_MODE" != gate_marker_exists ] || exit 1
+        mkdir "$TESTROOT/attempt-marker/gates-started" ;;
+    '-n mkdir /var/lib/runix-apt-canary/resume-before-gates') mkdir "$TESTROOT/attempt-marker/resume-before-gates" ;;
+    '-n mkdir /var/lib/runix-apt-canary/repeat-clean-gates-'*)
+        target=${3#/var/lib/runix-apt-canary/}
+        [ "$TEST_MODE" != gate_marker_exists ] || exit 1
+        mkdir "$TESTROOT/attempt-marker/$target" ;;
+    '-n cat /var/log/runix/audit.jsonl')
+        [ "$TEST_MODE" != export_fail ] || exit 1
+        cat "$TESTROOT/audit-raw.jsonl" ;;
+    '-n rm -f '*) [ "$TEST_MODE" != cleanup_fail ] ;;
+    '-n systemctl restart polkit') exit 0 ;;
+    '-n test ! -e '*) [ "$TEST_MODE" != cleanup_fail ] ;;
+    '-n dpkg --audit') exit 0 ;;
+    *) echo "UNHANDLED FAKE SUDO: $*" >&2; exit 99 ;;
+esac
+EOF
+cat > "$TESTROOT/bin/hostname" <<'EOF'
+#!/bin/bash
+echo synthetic-disposable
+EOF
+cat > "$TESTROOT/bin/cat" <<'EOF'
+#!/bin/bash
+if [ "$#" -eq 1 ] && [ "$1" = /etc/machine-id ]; then
+    echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+else
+    exec /bin/cat "$@"
+fi
+EOF
+cat > "$TESTROOT/bin/getent" <<'EOF'
+#!/bin/bash
+exit 2
+EOF
+cat > "$TESTROOT/bin/dpkg" <<'EOF'
+#!/bin/bash
+[ "$*" = --audit ] || exit 99
+EOF
+cat > "$TESTROOT/bin/dpkg-query" <<'EOF'
+#!/bin/bash
+case "$*" in '-W pkgexec'|'-W runix-audit-broker') exit 1;; esac
+echo 'synthetic-package 1.0 install ok installed'
+EOF
+cat > "$TESTROOT/bin/stat" <<'EOF'
+#!/bin/bash
+echo 'synthetic-entrypoint root:root 755 123'
+EOF
+cat > "$TESTROOT/bin/Rscript" <<'EOF'
+#!/bin/bash
+echo 'synthetic R package versions'
+EOF
+cat > "$TESTROOT/stage/install-apt-stack.sh" <<'EOF'
+#!/bin/bash
+touch "$TESTROOT/bootstrap-ran"
+[ "$TEST_MODE" != install_fail ] || exit 21
+if [ "$TEST_MODE" = install_term ]; then kill -TERM "$PPID"; exit 23; fi
+echo 'synthetic install completed'
+EOF
+cat > "$TESTROOT/stage/apt-fixtures.sh" <<'EOF'
+#!/bin/bash
+touch "$TESTROOT/fixtures-ran"
+[ "$(umask)" = 0022 ] || { echo 'fixture package permissions would be wrong' >&2; exit 24; }
+echo 'synthetic fixtures completed'
+EOF
+cat > "$TESTROOT/stage/resume-before-gates.sh" <<'EOF'
+#!/bin/bash
+set -e
+case "$1" in
+    check|check-repeat) [ "$TEST_MODE" != resume_check_fail ] ;;
+    refresh|refresh-repeat)
+        if [ "$1" = refresh-repeat ]; then
+            hash=$(sha256sum "$4/SHA256SUMS" | cut -d' ' -f1)
+            sudo -n mkdir "/var/lib/runix-apt-canary/repeat-clean-gates-$hash"
+        else
+            sudo -n mkdir /var/lib/runix-apt-canary/resume-before-gates
+        fi
+        touch "$TESTROOT/refresh-ran"
+        [ "$TEST_MODE" != resume_setup_fail ] ;;
+    *) exit 99 ;;
+esac
+EOF
+cat > "$TESTROOT/stage/polkit-matrix.sh" <<'EOF'
+#!/bin/bash
+[ "$TEST_MODE" != matrix_fail ] || exit 22
+if [ -e "$TESTROOT/gates-ran" ]; then
+    cat "$TESTROOT/good/05-matrix-after.log"
+else
+    cat "$TESTROOT/good/03-matrix.log"
+fi
+EOF
+cat > "$TESTROOT/stage/apt-gates.sh" <<'EOF'
+#!/bin/bash
+touch "$TESTROOT/gates-ran"
+cat "$TESTROOT/good/04-gates.log"
+EOF
+chmod +x "$TESTROOT/bin/"*
+for p in runix-audit-broker pkgexec janssonr runix pkgstate pkgops; do
+    tar -czf "$TESTROOT/stage/$p.tar.gz" -T /dev/null
+done
+for f in MANIFEST apt-issue.sh apt-issue.R machine-refusal.R check-completed-gates.sh fcntl-lock.c; do printf 'synthetic\n' > "$TESTROOT/stage/$f"; done
+(cd "$TESTROOT/stage" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+    | sort | xargs sha256sum > SHA256SUMS)
+# Use a clean private HOME for each invocation; never edit the real HOME.
+run_driver() {
+    env PATH="$TESTROOT/bin:$PATH" HOME="$TESTROOT/home" TEST_MODE="$1" \
+        bash "$TESTROOT/stage/apt-canary-local.sh" "$TESTROOT/stage" \
+        "${2:-synthetic-disposable}" "${3:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+}
+expect_failure run_driver good wrong-host
+[ ! -e "$TESTROOT/sudo-calls" ]
+ok 'wrong host refused before sudo'
+expect_failure run_driver good synthetic-disposable bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+[ ! -e "$TESTROOT/sudo-calls" ]
+ok 'wrong machine-id refused before sudo'
+cp "$TESTROOT/stage/MANIFEST" "$TESTROOT/original-manifest"
+printf 'tampered\n' >> "$TESTROOT/stage/MANIFEST"
+expect_failure run_driver good
+[ ! -e "$TESTROOT/sudo-calls" ]
+cp "$TESTROOT/original-manifest" "$TESTROOT/stage/MANIFEST"
+ok 'checksum mismatch refused before sudo'
+
+for mode in matrix_fail install_fail install_term export_fail cleanup_fail good; do
+    rm -f "$TESTROOT/gates-ran" "$TESTROOT/sudo-calls"
+    if [ -d "$TESTROOT/attempt-marker" ]; then rm -r "$TESTROOT/attempt-marker"; fi
+    if [ "$mode" = good ]; then
+        run_driver "$mode" > "$TESTROOT/last-output" 2>&1
+    else
+        expect_failure run_driver "$mode"
+    fi
+    if [ "$mode" = matrix_fail ] || [ "$mode" = install_fail ] || [ "$mode" = install_term ]; then
+        [ ! -e "$TESTROOT/gates-ran" ]
+    else
+        [ -e "$TESTROOT/gates-ran" ]
+    fi
+    evid=$(awk '/^Evidence:/ {print $2}' "$TESTROOT/last-output" | tail -1)
+    [ -s "$evid/RESULT" ] && [ -s "$evid/SHA256SUMS" ]
+    (cd "$evid" && sha256sum --strict -c SHA256SUMS >/dev/null)
+    ok "driver $mode: sequencing, result and exit evidence"
+done
+expect_failure run_driver good
+ok 'attempt marker prevents a second run'
+
+# Continuation uses its own setup, fresh matrix and normal evidence gate. A
+# previous setup is retained; neither bootstrap nor fixtures may run again.
+mkdir "$TESTROOT/previous-stage" "$TESTROOT/previous-evidence"
+cp "$TESTROOT/stage/MANIFEST" "$TESTROOT/previous-evidence/MANIFEST"
+cp "$TESTROOT/stage/SHA256SUMS" "$TESTROOT/previous-evidence/INPUT-SHA256SUMS"
+cp "$TESTROOT/stage/SHA256SUMS" "$TESTROOT/previous-evidence/SHA256SUMS"
+run_resume() {
+    env PATH="$TESTROOT/bin:$PATH" HOME="$TESTROOT/home" TEST_MODE="$1" \
+        bash "$TESTROOT/stage/apt-canary-local.sh" "$TESTROOT/stage" \
+        synthetic-disposable aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${2:---resume-before-gates}" \
+        "$TESTROOT/previous-stage" "$TESTROOT/previous-evidence"
+}
+for mode in resume_check_fail resume_setup_fail matrix_fail gate_marker_exists good; do
+    rm -f "$TESTROOT/gates-ran" "$TESTROOT/sudo-calls" "$TESTROOT/bootstrap-ran" \
+        "$TESTROOT/fixtures-ran" "$TESTROOT/refresh-ran"
+    rm -r "$TESTROOT/attempt-marker"
+    mkdir "$TESTROOT/attempt-marker"
+    if [ "$mode" = good ]; then
+        run_resume "$mode" > "$TESTROOT/last-output" 2>&1
+    else
+        expect_failure run_resume "$mode"
+    fi
+    [ ! -e "$TESTROOT/bootstrap-ran" ] && [ ! -e "$TESTROOT/fixtures-ran" ]
+    if [ "$mode" = resume_check_fail ]; then
+        [ ! -e "$TESTROOT/sudo-calls" ] && [ ! -e "$TESTROOT/refresh-ran" ]
+    else
+        [ -e "$TESTROOT/refresh-ran" ]
+        evid=$(awk '/^Evidence:/ {print $2}' "$TESTROOT/last-output" | tail -1)
+        grep -Fxq 'run_mode=resume-before-gates' "$evid/RESULT"
+        cmp "$TESTROOT/previous-evidence/MANIFEST" "$evid/PREVIOUS-MANIFEST"
+        [ -s "$evid/resumed-from.txt" ]
+        (cd "$evid" && sha256sum --strict -c SHA256SUMS >/dev/null)
+    fi
+    if [ "$mode" = good ]; then [ -e "$TESTROOT/gates-ran" ]; else [ ! -e "$TESTROOT/gates-ran" ]; fi
+    ok "continuation $mode: phase guards, provenance and exit evidence"
+done
+expect_failure run_resume good
+ok 'continuation marker prevents a repeated resume'
+for mode in resume_check_fail resume_setup_fail matrix_fail export_fail good; do
+    rm -f "$TESTROOT/gates-ran" "$TESTROOT/sudo-calls" "$TESTROOT/bootstrap-ran" \
+        "$TESTROOT/fixtures-ran" "$TESTROOT/refresh-ran"
+    rm -r "$TESTROOT/attempt-marker"
+    mkdir "$TESTROOT/attempt-marker"
+    mkdir "$TESTROOT/attempt-marker/gates-started" "$TESTROOT/attempt-marker/resume-before-gates"
+    if [ "$mode" = good ]; then
+        run_resume "$mode" --repeat-clean-gates > "$TESTROOT/last-output" 2>&1
+    else
+        expect_failure run_resume "$mode" --repeat-clean-gates
+    fi
+    [ ! -e "$TESTROOT/bootstrap-ran" ] && [ ! -e "$TESTROOT/fixtures-ran" ]
+    [ -d "$TESTROOT/attempt-marker/gates-started" ]
+    [ -d "$TESTROOT/attempt-marker/resume-before-gates" ]
+    if [ "$mode" = resume_check_fail ]; then
+        [ ! -e "$TESTROOT/sudo-calls" ] && [ ! -e "$TESTROOT/refresh-ran" ]
+    else
+        evid=$(awk '/^Evidence:/ {print $2}' "$TESTROOT/last-output" | tail -1)
+        grep -Fxq 'run_mode=repeat-clean-gates' "$evid/RESULT"
+        cmp "$TESTROOT/previous-evidence/MANIFEST" "$evid/PREVIOUS-MANIFEST"
+        (cd "$evid" && sha256sum --strict -c SHA256SUMS >/dev/null)
+    fi
+    if [ "$mode" = good ] || [ "$mode" = export_fail ]; then
+        [ -e "$TESTROOT/gates-ran" ]
+    else
+        [ ! -e "$TESTROOT/gates-ran" ]
+    fi
+    ok "repeat $mode: fresh matrix, preserved markers and new evidence"
+done
+expect_failure run_resume good --repeat-clean-gates
+ok 'one repeat per completed evidence bundle'
+echo "$pass harness checks passed"

@@ -48,7 +48,12 @@ echo "#### polkit matrix (5 proofs) ####"
 set +e
 guest "bash $GDIR/polkit-matrix.sh" 2>&1 | tee "$EVID/03-matrix.log"; M=${PIPESTATUS[0]}
 echo "#### §7 apt-mutation gates ####"
-guest "bash $GDIR/apt-gates.sh" 2>&1 | tee "$EVID/04-gates.log"; G=${PIPESTATUS[0]}
+G=1
+if [ "$M" -eq 0 ]; then
+    guest "bash $GDIR/apt-gates.sh" 2>&1 | tee "$EVID/04-gates.log"; G=${PIPESTATUS[0]}
+else
+    echo 'SKIPPED: authorization matrix failed' | tee "$EVID/04-gates.log"
+fi
 set -e
 
 echo "#### collect REDACTED evidence (raw sink never leaves the guest) ####"

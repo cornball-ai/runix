@@ -142,8 +142,10 @@ GNUPGHOME="$GH" gpg --batch --yes -abs -o "$SIGNREPO/Release.gpg" "$SIGNREPO/Rel
 # inline Signed-By key alone verified it. Nothing is left in the system sources.list.d;
 # the G-INLINE gate adds it there for its own run.
 VDIR="$BUILD/inline-verify"; mkdir -p "$VDIR"
+VLIST="$BUILD/inline-lists"; mkdir -p "$VLIST/partial"
 cp /srv/canary-inline.sources "$VDIR/canary-inline.sources"
 if sudo apt-get update -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts="$VDIR" \
+       -o Dir::State::lists="$VLIST" \
        -o Dir::Etc::trusted=/dev/null -o Dir::Etc::trustedparts=/dev/null \
        -qq 2>"$BUILD/inline-update.err"; then
     echo "  inline-key repo signed + verified via its inline key (staged at /srv/canary-inline.sources)"
@@ -152,4 +154,7 @@ else
     cat "$BUILD/inline-update.err" >&2
     exit 1
 fi
+# The isolated signed-repo check must not clean the normal fixture indexes.
+CBVERS=$(LC_ALL=C apt-cache madison canary-benign | awk '{print $3}' | sort -u | paste -sd ' ')
+[ "$CBVERS" = '1.0 1.1' ] || { echo 'apt-fixtures: normal canary indexes were lost' >&2; exit 1; }
 echo "apt-fixtures: OK"

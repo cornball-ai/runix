@@ -1,28 +1,34 @@
 #!/bin/bash
 # Runs on the workstation (where the repos live). Produces a fully REPRODUCIBLE
-# staging set: it captures the FIVE commit IDs (broker, pkgexec, runix, pkgstate,
-# pkgops) ONCE and sources EVERY artifact from those exact commits with `git archive`
+# staging set: it captures SIX commit IDs (broker, pkgexec, janssonr, runix,
+# pkgstate, pkgops) ONCE and sources EVERY artifact from those exact commits with `git archive`
 # — the C source tarballs (broker, pkgexec), the R source tarballs (runix, pkgstate,
 # pkgops, for Part B's pkgops issuer path) AND the payload scripts/helpers/redactor
 # (never the worktree). runix serves double duty: its tree is BOTH the R package
 # source (runix.tar.gz) and the payload directory (deploy/canary-apt). It refuses
-# unless all five trees are clean, checksums EVERYTHING transferred, and stages into a
+# unless all six trees are clean, checksums EVERYTHING transferred, and stages into a
 # unique, owned directory on the host. Nothing is built here.
 #
-#   deploy/canary-apt/build-and-stage.sh <kvm-host>     # host is REQUIRED
+#   build-and-stage.sh <host> | --local <new-directory>
 set -euo pipefail
-G5="${1:?usage: build-and-stage.sh <kvm-host>   (no default host; pass it explicitly)}"
+DEST="${1:?usage: build-and-stage.sh <host> | --local <new-directory>}"
+if [ "$DEST" = --local ]; then
+    [ "$#" -eq 2 ] || { echo 'need a new local output directory' >&2; exit 2; }
+else
+    [ "$#" -eq 1 ] || exit 2
+fi
 BROKER="${BROKER:-/home/troy/runix-audit-broker}"
 PKGEXEC="${PKGEXEC:-/home/troy/pkgexec}"
 PKGSTATE="${PKGSTATE:-/home/troy/pkgstate}"
 PKGOPS="${PKGOPS:-/home/troy/pkgops}"
+JANSSONR="${JANSSONR:-/home/troy/janssonr}"
 HERE="$(dirname "$(readlink -f "$0")")"
 RUNIX="$(git -C "$HERE" rev-parse --show-toplevel)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "== require clean trees (stage exactly what is committed) =="
-for r in "$BROKER" "$PKGEXEC" "$RUNIX" "$PKGSTATE" "$PKGOPS"; do
+for r in "$BROKER" "$PKGEXEC" "$JANSSONR" "$RUNIX" "$PKGSTATE" "$PKGOPS"; do
     if [ -n "$(git -C "$r" status --porcelain)" ]; then
         echo "refusing: $r has uncommitted changes; commit them first" >&2
         git -C "$r" status --short >&2
@@ -30,18 +36,21 @@ for r in "$BROKER" "$PKGEXEC" "$RUNIX" "$PKGSTATE" "$PKGOPS"; do
     fi
 done
 
-# Capture the five commit IDs ONCE; every artifact is sourced from these.
+# Capture the six commit IDs ONCE; every artifact is sourced from these.
 BSHA="$(git -C "$BROKER" rev-parse HEAD)"
 PSHA="$(git -C "$PKGEXEC" rev-parse HEAD)"
 RSHA="$(git -C "$RUNIX" rev-parse HEAD)"
 SSHA="$(git -C "$PKGSTATE" rev-parse HEAD)"
 OSHA="$(git -C "$PKGOPS" rev-parse HEAD)"
+JSHA="$(git -C "$JANSSONR" rev-parse HEAD)"
 
 echo "== git archive every artifact from its exact commit =="
 git -C "$BROKER" archive --format=tar.gz --prefix=runix-audit-broker/ "$BSHA" \
     > "$STAGE/runix-audit-broker.tar.gz"
 git -C "$PKGEXEC" archive --format=tar.gz --prefix=pkgexec/ "$PSHA" \
     > "$STAGE/pkgexec.tar.gz"
+git -C "$JANSSONR" archive --format=tar.gz --prefix=janssonr/ "$JSHA" \
+    > "$STAGE/janssonr.tar.gz"
 # the R sources for Part B's pkgops issuer path: each extracts to <pkg>/ in the guest,
 # where install-apt-stack.sh runs `R CMD INSTALL` in dependency order.
 git -C "$RUNIX" archive --format=tar.gz --prefix=runix/ "$RSHA" \
@@ -58,6 +67,7 @@ git -C "$RUNIX" archive "$RSHA" deploy/canary-apt \
     echo "# canary-apt build manifest"
     printf 'broker    %s (%s)\n' "$BSHA" "$(git -C "$BROKER" rev-parse --abbrev-ref HEAD)"
     printf 'pkgexec   %s (%s)\n' "$PSHA" "$(git -C "$PKGEXEC" rev-parse --abbrev-ref HEAD)"
+    printf 'janssonr  %s (%s)\n' "$JSHA" "$(git -C "$JANSSONR" rev-parse --abbrev-ref HEAD)"
     printf 'runix     %s (%s)\n' "$RSHA" "$(git -C "$RUNIX" rev-parse --abbrev-ref HEAD)"
     printf 'pkgstate  %s (%s)\n' "$SSHA" "$(git -C "$PKGSTATE" rev-parse --abbrev-ref HEAD)"
     printf 'pkgops    %s (%s)\n' "$OSHA" "$(git -C "$PKGOPS" rev-parse --abbrev-ref HEAD)"
@@ -68,8 +78,14 @@ echo "== checksum EVERYTHING transferred =="
     | sort | xargs sha256sum > SHA256SUMS )
 cat "$STAGE/MANIFEST"; echo; cat "$STAGE/SHA256SUMS"
 
-echo "== stage into a unique, owned host directory =="
-HOSTSTAGE="$(ssh "$G5" 'mktemp -d "$HOME/canary-apt-stage.XXXXXX"')"
-scp "$STAGE"/* "$G5":"$HOSTSTAGE"/
-echo "staged at $G5:$HOSTSTAGE"
-echo "run:  ssh $G5 bash $HOSTSTAGE/apt-canary-guest.sh $HOSTSTAGE"
+if [ "$DEST" = --local ]; then
+    mkdir -- "$2"  # refuse an existing directory
+    cp -p "$STAGE"/* "$2/"
+    echo "staged locally at $2"
+else
+    echo "== stage into a unique, owned host directory =="
+    HOSTSTAGE="$(ssh -o StrictHostKeyChecking=yes "$DEST" 'mktemp -d "$HOME/canary-apt-stage.XXXXXX"')"
+    scp -o StrictHostKeyChecking=yes "$STAGE"/* "$DEST":"$HOSTSTAGE"/
+    echo "staged at $DEST:$HOSTSTAGE"
+    echo "Choose the guest or local driver per deploy/canary-apt-runbook.md."
+fi
