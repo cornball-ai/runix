@@ -6,11 +6,18 @@ set -euo pipefail
 # Build/fixture directories become package contents and must be world-readable.
 # Evidence privacy comes from mktemp's mode-0700 directory, not a build-wide mask.
 umask 022
-[ "$#" -eq 3 ] || { echo "usage: $0 <stage-dir> <expected-hostname> <expected-machine-id>" >&2; exit 2; }
+[ "$#" -eq 3 ] || [ "$#" -eq 6 ] || { echo "usage: $0 <stage-dir> <expected-hostname> <expected-machine-id> [--resume-before-gates <previous-stage> <previous-evidence>]" >&2; exit 2; }
 STAGEDIR=$(realpath -e "$1")
 EXPECTED_HOST=$2
 EXPECTED_ID=$3
 die() { echo "REFUSING: $*" >&2; exit 1; }
+RUN_MODE=fresh
+if [ "$#" -eq 6 ]; then
+    [ "$4" = --resume-before-gates ] || die 'unknown continuation option'
+    RUN_MODE=resume-before-gates
+    PREVIOUS_STAGE=$(realpath -e "$5")
+    PREVIOUS_EVIDENCE=$(realpath -e "$6")
+fi
 [[ "$EXPECTED_ID" =~ ^[0-9a-f]{32}$ ]] || die 'invalid expected machine-id'
 [ "$(hostname)" = "$EXPECTED_HOST" ] || die 'hostname mismatch'
 [ "$(cat /etc/machine-id)" = "$EXPECTED_ID" ] || die 'machine-id mismatch'
@@ -20,7 +27,9 @@ die() { echo "REFUSING: $*" >&2; exit 1; }
 [ "${ID:-}" = ubuntu ] || die 'this harness requires Ubuntu'
 
 # These checks precede sudo and every host mutation. The root-owned attempt marker
-# below survives interrupted runs: another full attempt requires OS reprovisioning.
+# below survives interrupted runs. The explicit continuation validates a completed
+# setup that never entered the destructive gates; it does not erase that marker.
+if [ "$RUN_MODE" = fresh ]; then
 for who in aptbot aptuser 1002 1003; do
     if getent passwd "$who" >/dev/null; then die "canary principal/uid already exists: $who"; fi
 done
@@ -37,11 +46,12 @@ AUDIT=$(dpkg --audit)
 for p in pkgexec runix-audit-broker; do
     if dpkg-query -W "$p" >/dev/null 2>&1; then die "existing package: $p"; fi
 done
+fi
 
 cd "$STAGEDIR"
 # An omitted checksum must not turn an unverified payload into a trusted one.
 for f in MANIFEST apt-canary-local.sh install-apt-stack.sh apt-fixtures.sh \
-         polkit-matrix.sh machine-refusal.R apt-gates.sh redact.jq verify-evidence.sh verify-evidence.jq \
+         polkit-matrix.sh machine-refusal.R resume-before-gates.sh apt-gates.sh redact.jq verify-evidence.sh verify-evidence.jq \
          apt-issue.sh apt-issue.R fcntl-lock.c \
          runix-audit-broker.tar.gz pkgexec.tar.gz janssonr.tar.gz runix.tar.gz \
          pkgstate.tar.gz pkgops.tar.gz; do
@@ -49,10 +59,18 @@ for f in MANIFEST apt-canary-local.sh install-apt-stack.sh apt-fixtures.sh \
         || die "missing checksum: $f"
 done
 sha256sum --strict -c SHA256SUMS
+if [ "$RUN_MODE" = resume-before-gates ]; then
+    bash "$STAGEDIR/resume-before-gates.sh" check "$STAGEDIR" "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE"
+fi
 mkdir -p "$HOME/canary-apt"
 EVID=$(mktemp -d "$HOME/canary-apt/evidence-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 cp MANIFEST "$EVID/MANIFEST"
 cp SHA256SUMS "$EVID/INPUT-SHA256SUMS"
+if [ "$RUN_MODE" = resume-before-gates ]; then
+    cp "$PREVIOUS_EVIDENCE/MANIFEST" "$EVID/PREVIOUS-MANIFEST"
+    cp "$PREVIOUS_EVIDENCE/INPUT-SHA256SUMS" "$EVID/PREVIOUS-INPUT-SHA256SUMS"
+    printf '%s\n' "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE" > "$EVID/resumed-from.txt"
+fi
 sha256sum --strict -c SHA256SUMS > "$EVID/00-checksums.log"
 { hostname; cat /etc/machine-id /etc/os-release; uname -a; id; } > "$EVID/host.txt"
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Status}\n' > "$EVID/packages-before.tsv"
@@ -67,7 +85,7 @@ finish() {
     set +e
     if [ "$MUTATION_STARTED" -eq 1 ]; then
         # Only paths reserved by this harness are removed. Never repair dpkg here:
-        # a broken fixture is evidence, and a failed run needs a fresh baseline.
+        # a broken fixture is evidence and needs inspection before another run.
         if [ "$GATES_STARTED" -eq 1 ]; then
             sudo -n rm -f /etc/polkit-1/rules.d/49-canary-apt-temp.rules \
                 /etc/apt/preferences.d/99-canary-g5-pin \
@@ -105,12 +123,12 @@ finish() {
     fi
     if [ -n "$KEEPALIVE" ]; then kill "$KEEPALIVE" 2>/dev/null; wait "$KEEPALIVE" 2>/dev/null; fi
     [ "$cleanup_rc" -eq 0 ] && [ "$evidence_rc" -eq 0 ] || rc=1
-    printf 'phase=%s\nexit_code=%s\ncleanup_exit=%s\nevidence_exit=%s\n' \
-        "$PHASE" "$rc" "$cleanup_rc" "$evidence_rc" > "$EVID/RESULT"
+    printf 'run_mode=%s\nphase=%s\nexit_code=%s\ncleanup_exit=%s\nevidence_exit=%s\n' \
+        "$RUN_MODE" "$PHASE" "$rc" "$cleanup_rc" "$evidence_rc" > "$EVID/RESULT"
     (cd "$EVID" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
         | sort | xargs sha256sum > SHA256SUMS) || rc=1
     echo "Evidence: $EVID"
-    echo "Copy and verify this bundle off the disposable host before reinstalling."
+    echo "Copy and verify this bundle off the disposable host before another run."
     echo "Canary exit: $rc (phase=$PHASE cleanup=$cleanup_rc evidence=$evidence_rc)"
     exit "$rc"
 }
@@ -124,6 +142,7 @@ echo "Evidence: $EVID"
 sudo -v
 (while sleep 30; do sudo -n -v || exit; done) &
 KEEPALIVE=$!
+if [ "$RUN_MODE" = fresh ]; then
 # Atomic, root-owned marker; never removed by the harness.
 sudo -n mkdir /var/lib/runix-apt-canary
 MUTATION_STARTED=1
@@ -133,9 +152,16 @@ PHASE=install
 bash "$STAGEDIR/install-apt-stack.sh" "$STAGEDIR" 2>&1 | tee "$EVID/01-install.log"
 PHASE=fixtures
 bash "$STAGEDIR/apt-fixtures.sh" 2>&1 | tee "$EVID/02-fixtures.log"
+else
+    PHASE=resume-setup
+    MUTATION_STARTED=1
+    bash "$STAGEDIR/resume-before-gates.sh" refresh "$STAGEDIR" "$PREVIOUS_STAGE" "$PREVIOUS_EVIDENCE" \
+        2>&1 | tee "$EVID/01-resume-setup.log"
+fi
 PHASE=matrix
 bash "$STAGEDIR/polkit-matrix.sh" 2>&1 | tee "$EVID/03-matrix.log"
 PHASE=gates
+sudo -n mkdir /var/lib/runix-apt-canary/gates-started
 GATES_STARTED=1
 bash "$STAGEDIR/apt-gates.sh" 2>&1 | tee "$EVID/04-gates.log"
 PHASE=complete

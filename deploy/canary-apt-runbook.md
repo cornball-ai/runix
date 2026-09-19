@@ -213,8 +213,29 @@ first privileged operation. It refuses existing canary users/uids, the autonomou
 group, previous Runix/canary state, or broken dpkg state. After the operator's
 `sudo -v`, a bounded-interval refresh preserves that existing authentication for
 the run; the harness does not change sudo policy. A root-owned attempt directory
-at `/var/lib/runix-apt-canary` prevents another full attempt on a mutated host.
-**Reprovision the OS for every full retry.** Never delete the marker to retry.
+at `/var/lib/runix-apt-canary` prevents blindly repeating setup on a mutated host.
+Never delete the marker as a substitute for checking the previous attempt.
+
+If setup completed but the destructive gates never started, an explicit
+continuation can retain the existing OS and fixtures:
+
+```
+bash <stage-dir>/apt-canary-local.sh <stage-dir> <expected-hostname> <expected-machine-id> \
+  --resume-before-gates <previous-stage-dir> <previous-evidence-dir>
+```
+
+This checks the previous host identity, successful bootstrap/fixture markers,
+bundle checksums, unchanged native source pins and installed package files,
+fixture users/membership, clean dpkg, and untouched gate package state. It refuses
+any previous gate log, root gate-start marker, temporary grant/pin/source, held
+apt/dpkg lock, or repeated continuation. The old matrix log is never read or
+copied. Only after those checks does it reinstall the four pinned R sources,
+refresh apt indexes, and verify the R versions loaded by `aptbot`. A fresh
+authorization matrix still gates all destructive tests. Evidence labels the run
+`resume-before-gates` and includes the previous manifest and input checksums.
+Failures after destructive gates began need a separately reviewed reset of the
+affected fixture state, or a fresh OS baseline; this continuation cannot bypass
+that state.
 
 The sequence is install -> fixtures -> polkit matrix -> destructive gates.
 A failed matrix stops before the gates. On normal or catchable failure exits,
@@ -222,7 +243,8 @@ the driver collects redacted audit records, source provenance, checksums, packag
 versions/paths, dpkg state and logs, and checks removal of temporary grants,
 pins and sources. It repeats the matrix after cleanup. No automatic dpkg repair
 hides a broken fixture. Power loss or SIGKILL cannot run an EXIT handler; preserve
-the partial evidence and reprovision rather than treating that attempt as passed.
+the partial evidence and inspect the failed phase before choosing a continuation
+or reset. Partial evidence never counts as a passed attempt.
 
 `verify-evidence.sh <evidence-directory>` requires successful matrix/gate logs and
 18 unique gate result rows matched by correlation ID to the durable record. It

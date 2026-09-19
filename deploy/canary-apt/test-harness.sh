@@ -66,6 +66,10 @@ printf '%s\n' "$*" >> "$TESTROOT/sudo-calls"
 case "$*" in
     '-v'|'-n -v') exit 0 ;;
     '-n mkdir /var/lib/runix-apt-canary') mkdir "$TESTROOT/attempt-marker" ;;
+    '-n mkdir /var/lib/runix-apt-canary/gates-started')
+        [ "$TEST_MODE" != gate_marker_exists ] || exit 1
+        mkdir "$TESTROOT/attempt-marker/gates-started" ;;
+    '-n mkdir /var/lib/runix-apt-canary/resume-before-gates') mkdir "$TESTROOT/attempt-marker/resume-before-gates" ;;
     '-n cat /var/log/runix/audit.jsonl')
         [ "$TEST_MODE" != export_fail ] || exit 1
         cat "$TESTROOT/audit-raw.jsonl" ;;
@@ -111,14 +115,28 @@ echo 'synthetic R package versions'
 EOF
 cat > "$TESTROOT/stage/install-apt-stack.sh" <<'EOF'
 #!/bin/bash
+touch "$TESTROOT/bootstrap-ran"
 [ "$TEST_MODE" != install_fail ] || exit 21
 if [ "$TEST_MODE" = install_term ]; then kill -TERM "$PPID"; exit 23; fi
 echo 'synthetic install completed'
 EOF
 cat > "$TESTROOT/stage/apt-fixtures.sh" <<'EOF'
 #!/bin/bash
+touch "$TESTROOT/fixtures-ran"
 [ "$(umask)" = 0022 ] || { echo 'fixture package permissions would be wrong' >&2; exit 24; }
 echo 'synthetic fixtures completed'
+EOF
+cat > "$TESTROOT/stage/resume-before-gates.sh" <<'EOF'
+#!/bin/bash
+set -e
+case "$1" in
+    check) [ "$TEST_MODE" != resume_check_fail ] ;;
+    refresh)
+        sudo -n mkdir /var/lib/runix-apt-canary/resume-before-gates
+        touch "$TESTROOT/refresh-ran"
+        [ "$TEST_MODE" != resume_setup_fail ] ;;
+    *) exit 99 ;;
+esac
 EOF
 cat > "$TESTROOT/stage/polkit-matrix.sh" <<'EOF'
 #!/bin/bash
@@ -162,7 +180,7 @@ ok 'checksum mismatch refused before sudo'
 
 for mode in matrix_fail install_fail install_term export_fail cleanup_fail good; do
     rm -f "$TESTROOT/gates-ran" "$TESTROOT/sudo-calls"
-    if [ -d "$TESTROOT/attempt-marker" ]; then rmdir "$TESTROOT/attempt-marker"; fi
+    if [ -d "$TESTROOT/attempt-marker" ]; then rm -r "$TESTROOT/attempt-marker"; fi
     if [ "$mode" = good ]; then
         run_driver "$mode" > "$TESTROOT/last-output" 2>&1
     else
@@ -180,4 +198,42 @@ for mode in matrix_fail install_fail install_term export_fail cleanup_fail good;
 done
 expect_failure run_driver good
 ok 'attempt marker prevents a second run'
+
+# Continuation uses its own setup, fresh matrix and normal evidence gate. A
+# previous setup is retained; neither bootstrap nor fixtures may run again.
+mkdir "$TESTROOT/previous-stage" "$TESTROOT/previous-evidence"
+cp "$TESTROOT/stage/MANIFEST" "$TESTROOT/previous-evidence/MANIFEST"
+cp "$TESTROOT/stage/SHA256SUMS" "$TESTROOT/previous-evidence/INPUT-SHA256SUMS"
+run_resume() {
+    env PATH="$TESTROOT/bin:$PATH" HOME="$TESTROOT/home" TEST_MODE="$1" \
+        bash "$TESTROOT/stage/apt-canary-local.sh" "$TESTROOT/stage" \
+        synthetic-disposable aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --resume-before-gates \
+        "$TESTROOT/previous-stage" "$TESTROOT/previous-evidence"
+}
+for mode in resume_check_fail resume_setup_fail matrix_fail gate_marker_exists good; do
+    rm -f "$TESTROOT/gates-ran" "$TESTROOT/sudo-calls" "$TESTROOT/bootstrap-ran" \
+        "$TESTROOT/fixtures-ran" "$TESTROOT/refresh-ran"
+    rm -r "$TESTROOT/attempt-marker"
+    mkdir "$TESTROOT/attempt-marker"
+    if [ "$mode" = good ]; then
+        run_resume "$mode" > "$TESTROOT/last-output" 2>&1
+    else
+        expect_failure run_resume "$mode"
+    fi
+    [ ! -e "$TESTROOT/bootstrap-ran" ] && [ ! -e "$TESTROOT/fixtures-ran" ]
+    if [ "$mode" = resume_check_fail ]; then
+        [ ! -e "$TESTROOT/sudo-calls" ] && [ ! -e "$TESTROOT/refresh-ran" ]
+    else
+        [ -e "$TESTROOT/refresh-ran" ]
+        evid=$(awk '/^Evidence:/ {print $2}' "$TESTROOT/last-output" | tail -1)
+        grep -Fxq 'run_mode=resume-before-gates' "$evid/RESULT"
+        cmp "$TESTROOT/previous-evidence/MANIFEST" "$evid/PREVIOUS-MANIFEST"
+        [ -s "$evid/resumed-from.txt" ]
+        (cd "$evid" && sha256sum --strict -c SHA256SUMS >/dev/null)
+    fi
+    if [ "$mode" = good ]; then [ -e "$TESTROOT/gates-ran" ]; else [ ! -e "$TESTROOT/gates-ran" ]; fi
+    ok "continuation $mode: phase guards, provenance and exit evidence"
+done
+expect_failure run_resume good
+ok 'continuation marker prevents a repeated resume'
 echo "$pass harness checks passed"
